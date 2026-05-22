@@ -9,8 +9,11 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).optional(),
 
-  // Database
+  // Database. DATABASE_URL is the runtime (pooled) connection. The optional
+  // DIRECT_DATABASE_URL points at the non-pooled endpoint and is used only by
+  // Prisma migrate, which can't run over PgBouncer's transaction pool.
   DATABASE_URL: NonEmpty,
+  DIRECT_DATABASE_URL: Optional,
 
   // Hosted DarkCode AI (Moonshot upstream)
   MOONSHOT_API_KEY: NonEmpty,

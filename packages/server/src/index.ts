@@ -4,9 +4,11 @@ import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
 
 import { env, isProduction } from "./lib/env";
-import { initSentry, captureException } from "./lib/sentry";
+import { initSentry, captureException, Sentry } from "./lib/sentry";
 import { logger } from "./lib/logger";
-import { startPolarOutboxSweeper } from "./lib/polar-outbox";
+import { startPolarOutboxSweeper, stopPolarOutboxSweeper } from "./lib/polar-outbox";
+import { closeRedis } from "./lib/redis";
+import { db } from "@darkcode/database/client";
 import { requestContext, type RequestContextEnv } from "./middleware/request-context";
 import { rateLimit, userIdOrIp } from "./middleware/rate-limit";
 import { requireAuth } from "./middleware/require-auth";
@@ -14,6 +16,7 @@ import sessions from "./routes/sessions";
 import chat from "./routes/chat";
 import auth from "./routes/auth";
 import billing from "./routes/billing";
+import health from "./routes/health";
 
 initSentry();
 startPolarOutboxSweeper();
@@ -37,7 +40,6 @@ app.use(
   }),
 );
 
-// Body-size caps. Chat allows larger bodies because conversation history can grow.
 const standardBodyLimit = bodyLimit({ maxSize: 100 * 1024 });
 const chatBodyLimit = bodyLimit({ maxSize: 2 * 1024 * 1024 });
 
@@ -73,7 +75,6 @@ app.onError((error, c) => {
   return c.json({ error: message, requestId }, 500);
 });
 
-// Per-IP limit on the OAuth callback to slow down brute-force code/state probing.
 app.use(
   "/auth/*",
   rateLimit({ bucket: "auth", limit: 30, windowMs: 60_000 }),
@@ -84,7 +85,6 @@ app.use("/chat/*", requireAuth);
 app.use("/billing/checkout", requireAuth);
 app.use("/billing/portal", requireAuth);
 
-// Authenticated rate limits.
 app.use(
   "/sessions/*",
   standardBodyLimit,
@@ -102,12 +102,20 @@ app.use(
 );
 
 const routes = app
+  .route("/", health)
   .route("/auth", auth)
   .route("/billing", billing)
   .route("/sessions", sessions)
   .route("/chat", chat);
 
 export type AppType = typeof routes;
+
+const server = Bun.serve({
+  port: env.PORT,
+  fetch: app.fetch,
+  // idleTimeout must be high, otherwise LLM tool calls might not complete
+  idleTimeout: 255,
+});
 
 logger.info(
   {
@@ -119,5 +127,53 @@ logger.info(
   "server.start",
 );
 
-// idleTimeout must be high, otherwise LLM tool calls might not complete
-export default { port: env.PORT, fetch: app.fetch, idleTimeout: 255 };
+// ---------- graceful shutdown ----------
+const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS ?? "30000");
+let shuttingDown = false;
+
+async function gracefulShutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info({ signal, timeoutMs: SHUTDOWN_TIMEOUT_MS }, "shutdown.initiated");
+
+  // 1. Stop accepting new connections; let in-flight ones drain naturally.
+  server.stop(false);
+
+  // 2. Hard timeout — if streams are stuck, force-exit so the orchestrator
+  // can replace us rather than hang past the platform's grace period.
+  const forceExit = setTimeout(() => {
+    logger.error("shutdown.timeout_exceeded.force_exiting");
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  forceExit.unref();
+
+  // 3. Stop background workers.
+  stopPolarOutboxSweeper();
+
+  // 4. Flush Sentry events before we exit so nothing in-flight gets lost.
+  try {
+    await Sentry.close(2000);
+  } catch (error) {
+    logger.warn({ err: error }, "shutdown.sentry_close_failed");
+  }
+
+  // 5. Close external resources.
+  try {
+    await closeRedis();
+  } catch (error) {
+    logger.warn({ err: error }, "shutdown.redis_close_failed");
+  }
+  try {
+    await db.$disconnect();
+  } catch (error) {
+    logger.warn({ err: error }, "shutdown.db_disconnect_failed");
+  }
+
+  logger.info("shutdown.complete");
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
+
+export default server;
