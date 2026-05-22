@@ -1,0 +1,22 @@
+{
+  "name": "@darkcode/database",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/client.ts"
+  },
+  "scripts": {
+    "db:generate": "bunx prisma generate",
+    "db:push": "bun --bun run prisma db push"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "prisma": "^7.7.0"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.7.0",
+    "@prisma/client": "^7.7.0",
+    "dotenv": "^17.4.1"
+  }
+}
