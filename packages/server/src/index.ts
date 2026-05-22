@@ -6,6 +6,7 @@ import { bodyLimit } from "hono/body-limit";
 import { env, isProduction } from "./lib/env";
 import { initSentry, captureException } from "./lib/sentry";
 import { logger } from "./lib/logger";
+import { startPolarOutboxSweeper } from "./lib/polar-outbox";
 import { requestContext, type RequestContextEnv } from "./middleware/request-context";
 import { rateLimit, userIdOrIp } from "./middleware/rate-limit";
 import { requireAuth } from "./middleware/require-auth";
@@ -15,6 +16,7 @@ import auth from "./routes/auth";
 import billing from "./routes/billing";
 
 initSentry();
+startPolarOutboxSweeper();
 
 const corsOrigins = env.CORS_ORIGINS.split(",").map((s) => s.trim()).filter(Boolean);
 const corsAllowAll = corsOrigins.length === 1 && corsOrigins[0] === "*";

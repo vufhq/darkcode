@@ -20,7 +20,9 @@ import {
 } from "@darkcode/shared";
 import { buildSystemPrompt } from "../system-prompt";
 import type { AuthenticatedEnv } from "../middleware/require-auth";
-import { getAvailableCreditsBalance, ingestAiUsage } from "../lib/polar";
+import { getAvailableCreditsBalance } from "../lib/polar";
+import { ingestAiUsageWithOutbox } from "../lib/polar-outbox";
+import { claimIdempotencyKey } from "../lib/idempotency";
 import { calculateCreditsForUsage } from "../lib/credits";
 import { captureException } from "../lib/sentry";
 import {
@@ -87,6 +89,20 @@ const app = new Hono<AuthenticatedEnv>()
       const log = c.get("log");
       const requestId = c.get("requestId");
       const { id, messages, mode, model } = c.req.valid("json");
+
+      // Idempotency: optional `Idempotency-Key` header. Two requests from the
+      // same user with the same key within the TTL only get processed once.
+      const idempotencyKey = c.req.header("idempotency-key");
+      if (idempotencyKey) {
+        const claimed = await claimIdempotencyKey("chat", userId, idempotencyKey);
+        if (!claimed) {
+          log.info({ idempotencyKey, sessionId: id }, "chat.idempotency_duplicate");
+          return c.json(
+            { error: "Duplicate request — this idempotency key is already in flight or recently completed." },
+            409,
+          );
+        }
+      }
 
       const modelDefinition = findSupportedChatModel(model);
       if (!modelDefinition) {
@@ -169,6 +185,9 @@ const app = new Hono<AuthenticatedEnv>()
         messages: modelMessages,
         tools,
         providerOptions: resolvedModel.providerOptions,
+        // Stop the upstream call when the client disconnects so we don't
+        // keep burning provider tokens after the user navigated away.
+        abortSignal: c.req.raw.signal,
         onFinish(event) {
           completedUsage = event.totalUsage;
         },
@@ -213,24 +232,28 @@ const app = new Hono<AuthenticatedEnv>()
               usage: completedUsage,
             });
 
-            await ingestAiUsage({
+            // Inline-first; queues to the Postgres-backed outbox on failure so
+            // the background sweeper can retry without losing the event.
+            await ingestAiUsageWithOutbox({
               externalCustomerId: userId,
               eventId: `chat-message:${event.responseMessage.id}`,
               credits: billableUsage.credits,
             });
           } catch (error) {
+            // calculateCreditsForUsage can throw (bad usage shape). Surface it
+            // but don't fail the request — the response has already streamed.
             log.error(
               {
                 err: error,
                 sessionId: id,
                 messageId: event.responseMessage.id,
               },
-              "polar_ingest_failed",
+              "polar_credit_calc_failed",
             );
             captureException(error, {
               userId,
               requestId,
-              tags: { kind: "polar_ingest" },
+              tags: { kind: "polar_credit_calc" },
               extra: { sessionId: id, messageId: event.responseMessage.id },
             });
           }

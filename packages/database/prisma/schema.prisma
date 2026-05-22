@@ -21,3 +21,20 @@ model Session {
   messages  Json     @default("[]")
   @@index([userId])
 }
+
+// Outbox for Polar usage ingest events that failed inline. A background
+// sweeper retries pending rows with exponential backoff until completedAt
+// is set or attempts exhausts the cap. eventId mirrors the dedupe key we
+// pass to Polar so retried sweeps don't double-charge.
+model PolarIngestOutbox {
+  id          String    @id @default(cuid())
+  eventId     String    @unique
+  userId      String
+  credits     Int
+  attempts    Int       @default(0)
+  lastAttempt DateTime?
+  lastError   String?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  @@index([completedAt, lastAttempt])
+}
