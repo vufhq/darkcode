@@ -1,9 +1,13 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { cors } from "hono/cors";
+import { bodyLimit } from "hono/body-limit";
 
+import { env, isProduction } from "./lib/env";
 import { initSentry, captureException } from "./lib/sentry";
 import { logger } from "./lib/logger";
 import { requestContext, type RequestContextEnv } from "./middleware/request-context";
+import { rateLimit, userIdOrIp } from "./middleware/rate-limit";
 import { requireAuth } from "./middleware/require-auth";
 import sessions from "./routes/sessions";
 import chat from "./routes/chat";
@@ -12,15 +16,31 @@ import billing from "./routes/billing";
 
 initSentry();
 
-const isProduction = process.env.NODE_ENV === "production";
+const corsOrigins = env.CORS_ORIGINS.split(",").map((s) => s.trim()).filter(Boolean);
+const corsAllowAll = corsOrigins.length === 1 && corsOrigins[0] === "*";
 
 const app = new Hono<RequestContextEnv>();
 
 app.use("*", requestContext);
 
+app.use(
+  "*",
+  cors({
+    origin: (origin) => {
+      if (!origin) return origin;
+      if (corsAllowAll) return origin;
+      return corsOrigins.includes(origin) ? origin : null;
+    },
+    credentials: !corsAllowAll,
+  }),
+);
+
+// Body-size caps. Chat allows larger bodies because conversation history can grow.
+const standardBodyLimit = bodyLimit({ maxSize: 100 * 1024 });
+const chatBodyLimit = bodyLimit({ maxSize: 2 * 1024 * 1024 });
+
 app.onError((error, c) => {
   const requestId = c.get("requestId");
-  // userId is only set by requireAuth; may be absent on /auth/* or pre-auth errors.
   const userId = (c.var as { userId?: string }).userId;
   const log = c.get("log") ?? logger;
 
@@ -32,9 +52,6 @@ app.onError((error, c) => {
     );
   }
 
-  // Surface upstream provider errors (e.g. invalid model, rate limit, bad key)
-  // as a 502. In production, return a generic message; in dev, pass the upstream
-  // message through to make local debugging easier.
   if (error && typeof error === "object" && "name" in error && error.name === "AI_APICallError") {
     log.error({ err: error }, "upstream_model_error");
     captureException(error, { userId, requestId, tags: { kind: "upstream_model" } });
@@ -54,10 +71,33 @@ app.onError((error, c) => {
   return c.json({ error: message, requestId }, 500);
 });
 
+// Per-IP limit on the OAuth callback to slow down brute-force code/state probing.
+app.use(
+  "/auth/*",
+  rateLimit({ bucket: "auth", limit: 30, windowMs: 60_000 }),
+);
+
 app.use("/sessions/*", requireAuth);
 app.use("/chat/*", requireAuth);
 app.use("/billing/checkout", requireAuth);
 app.use("/billing/portal", requireAuth);
+
+// Authenticated rate limits.
+app.use(
+  "/sessions/*",
+  standardBodyLimit,
+  rateLimit({ bucket: "sessions", limit: 120, windowMs: 60_000, keyResolver: userIdOrIp }),
+);
+app.use(
+  "/chat/*",
+  chatBodyLimit,
+  rateLimit({ bucket: "chat", limit: 30, windowMs: 60_000, keyResolver: userIdOrIp }),
+);
+app.use(
+  "/billing/*",
+  standardBodyLimit,
+  rateLimit({ bucket: "billing", limit: 20, windowMs: 60_000, keyResolver: userIdOrIp }),
+);
 
 const routes = app
   .route("/auth", auth)
@@ -67,8 +107,15 @@ const routes = app
 
 export type AppType = typeof routes;
 
-const port = Number(process.env.PORT ?? "3000");
-logger.info({ port, env: process.env.NODE_ENV ?? "development" }, "server.start");
+logger.info(
+  {
+    port: env.PORT,
+    env: env.NODE_ENV,
+    redis: env.REDIS_URL ? "configured" : "memory-fallback",
+    cors: corsAllowAll ? "*" : corsOrigins,
+  },
+  "server.start",
+);
 
 // idleTimeout must be high, otherwise LLM tool calls might not complete
-export default { port, fetch: app.fetch, idleTimeout: 255 };
+export default { port: env.PORT, fetch: app.fetch, idleTimeout: 255 };

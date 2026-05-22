@@ -1,0 +1,62 @@
+import { z } from "zod";
+
+const NonEmpty = z.string().min(1);
+const Optional = z.string().min(1).optional();
+
+const schema = z.object({
+  // Runtime
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  PORT: z.coerce.number().int().positive().default(3000),
+  LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).optional(),
+
+  // Database
+  DATABASE_URL: NonEmpty,
+
+  // Hosted DarkCode AI (Moonshot upstream)
+  MOONSHOT_API_KEY: NonEmpty,
+  MOONSHOT_BASE_URL: z.string().url().default("https://api.moonshot.ai/v1"),
+  DARKCODE_BACKING_MODEL: z.string().default("kimi-k2.6"),
+
+  // Clerk
+  CLERK_FRONTEND_API: NonEmpty,
+  CLERK_OAUTH_CLIENT_ID: NonEmpty,
+  CLERK_OAUTH_CLIENT_SECRET: NonEmpty,
+  CLERK_PUBLISHABLE_KEY: NonEmpty,
+  CLERK_SECRET_KEY: NonEmpty,
+  JWT_SECRET: NonEmpty,
+
+  // Polar billing
+  POLAR_ACCESS_TOKEN: NonEmpty,
+  POLAR_PRODUCT_ID: NonEmpty,
+  POLAR_SERVER: z.enum(["sandbox", "production"]).default("sandbox"),
+  POLAR_CREDITS_METER_ID: NonEmpty,
+
+  // Observability (optional)
+  SENTRY_DSN: Optional,
+  SENTRY_RELEASE: Optional,
+  SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0),
+
+  // CORS — comma-separated allowlist of origins, "*" allows all (default).
+  CORS_ORIGINS: z.string().default("*"),
+
+  // Rate-limit / cache store. Leave empty to use the in-memory fallback.
+  REDIS_URL: Optional,
+});
+
+export type Env = z.infer<typeof schema>;
+
+function parseEnv(): Env {
+  const parsed = schema.safeParse(process.env);
+  if (parsed.success) return parsed.data;
+
+  const issues = parsed.error.issues
+    .map((issue) => `  - ${issue.path.join(".") || "<root>"}: ${issue.message}`)
+    .join("\n");
+  // Print before throwing — pino isn't initialized yet at this point.
+  console.error(`\nInvalid environment configuration:\n${issues}\n`);
+  throw new Error("Invalid environment configuration");
+}
+
+export const env: Env = parseEnv();
+
+export const isProduction = env.NODE_ENV === "production";

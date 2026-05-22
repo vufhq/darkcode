@@ -1,43 +1,9 @@
 import { Polar } from "@polar-sh/sdk";
-
-type PolarServer = "sandbox" | "production";
-
-function getRequiredEnv(name: string) {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} environment variable is required`);
-  }
-  return value;
-}
-
-export function getPolarAccessToken() {
-  return getRequiredEnv("POLAR_ACCESS_TOKEN");
-}
-
-export function getPolarProductId() {
-  return getRequiredEnv("POLAR_PRODUCT_ID");
-}
-
-export function getPolarCreditsMeterId() {
-  return getRequiredEnv("POLAR_CREDITS_METER_ID");
-}
-
-export function getPolarServer(): PolarServer {
-  const server = process.env.POLAR_SERVER;
-  if (!server) {
-    return "sandbox";
-  }
-
-  if (server !== "sandbox" && server !== "production") {
-    throw new Error("POLAR_SERVER must be either 'sandbox' or 'production'");
-  }
-
-  return server;
-}
+import { env } from "./env";
 
 const polar = new Polar({
-  accessToken: getPolarAccessToken(),
-  server: getPolarServer(),
+  accessToken: env.POLAR_ACCESS_TOKEN,
+  server: env.POLAR_SERVER,
 });
 
 function hasStatusCode(error: unknown): error is { statusCode: number } {
@@ -59,7 +25,7 @@ export async function createCheckoutUrl({
   requestUrl,
 }: CreateCheckoutUrlParams) {
   const result = await polar.checkouts.create({
-    products: [getPolarProductId()],
+    products: [env.POLAR_PRODUCT_ID],
     successUrl: new URL("/billing/success", requestUrl).toString(),
     externalCustomerId: customerExternalId,
     metadata: { source: "darkcode-cli" },
@@ -87,7 +53,7 @@ export async function getAvailableCreditsBalance(customerExternalId: string) {
     });
 
     const matchingMeters = customerState.activeMeters.filter(
-      (meter) => meter.meterId === getPolarCreditsMeterId(),
+      (meter) => meter.meterId === env.POLAR_CREDITS_METER_ID,
     );
 
     if (matchingMeters.length > 1) {

@@ -1,21 +1,21 @@
 import * as Sentry from "@sentry/node";
 import { logger } from "./logger";
+import { env } from "./env";
 
 let initialized = false;
 
 export function initSentry() {
   if (initialized) return;
-  const dsn = process.env.SENTRY_DSN;
-  if (!dsn) {
+  if (!env.SENTRY_DSN) {
     logger.info("Sentry disabled (SENTRY_DSN not set)");
     return;
   }
 
   Sentry.init({
-    dsn,
-    environment: process.env.NODE_ENV ?? "development",
-    release: process.env.SENTRY_RELEASE,
-    tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? "0"),
+    dsn: env.SENTRY_DSN,
+    environment: env.NODE_ENV,
+    release: env.SENTRY_RELEASE,
+    tracesSampleRate: env.SENTRY_TRACES_SAMPLE_RATE,
     sendDefaultPii: false,
   });
 

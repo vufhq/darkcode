@@ -52,15 +52,15 @@ const OPENAI_PROVIDER_OPTIONS: Partial<Record<OpenAIModelId, ProviderOptions>> =
   },
 };
 
+import { env } from "./env";
+
 // DarkCode AI is rebranded Kimi served from Moonshot's OpenAI-compatible API.
 // We pin the upstream model id here so callers only ever see the DarkCode label.
-// kimi-k2.6 is the current production model — override via DARKCODE_BACKING_MODEL
-// if you want to point at a different Kimi version.
 const DARKCODE_BACKING_MODEL: Record<DarkcodeModelId, string> = {
-  "darkcode-ai": process.env.DARKCODE_BACKING_MODEL ?? "kimi-k2.6",
+  "darkcode-ai": env.DARKCODE_BACKING_MODEL,
 };
 
-const MOONSHOT_BASE_URL = process.env.MOONSHOT_BASE_URL ?? "https://api.moonshot.ai/v1";
+const MOONSHOT_BASE_URL = env.MOONSHOT_BASE_URL;
 
 function assertUnsupportedProvider(provider: never): never {
   throw new Error(`Unsupported provider: ${provider}`);
@@ -89,10 +89,7 @@ function resolveOpenAIModel(modelId: OpenAIModelId, apiKey: string): ResolvedMod
 }
 
 function resolveDarkcodeModel(modelId: DarkcodeModelId): ResolvedModel {
-  const apiKey = process.env.MOONSHOT_API_KEY;
-  if (!apiKey) {
-    throw new Error("MOONSHOT_API_KEY is not configured on the server");
-  }
+  const apiKey = env.MOONSHOT_API_KEY;
 
   // Kimi K2.6 has thinking enabled by default. The AI SDK doesn't preserve
   // the model's reasoning_content across turns, so the next request fails with
