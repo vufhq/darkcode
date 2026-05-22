@@ -111,10 +111,21 @@ export async function performLogin() {
             throw new Error(details || "Failed to exchange authorization code");
           }
 
-          const tokenData = (await tokenRes.json()) as { access_token: string };
+          const tokenData = (await tokenRes.json()) as {
+            access_token: string;
+            refresh_token?: string;
+            expires_in?: number;
+          };
 
           settled = true;
-          saveAuth({ token: tokenData.access_token });
+          saveAuth({
+            token: tokenData.access_token,
+            refreshToken: tokenData.refresh_token,
+            expiresAt:
+              typeof tokenData.expires_in === "number"
+                ? Date.now() + tokenData.expires_in * 1000
+                : undefined,
+          });
           resolve({ token: tokenData.access_token });
           setTimeout(() => server.stop(), 500);
           return new Response("Authenticated! You can close this tab.");
@@ -143,7 +154,8 @@ export async function performLogin() {
     authorizeUrl.searchParams.set("response_type", "code");
     authorizeUrl.searchParams.set("client_id", clientId);
     authorizeUrl.searchParams.set("redirect_uri", redirectUri);
-    authorizeUrl.searchParams.set("scope", "openid email profile");
+    // offline_access is required for Clerk to return a refresh_token.
+    authorizeUrl.searchParams.set("scope", "openid email profile offline_access");
     authorizeUrl.searchParams.set("state", state);
     authorizeUrl.searchParams.set("prompt", "login");
     authorizeUrl.searchParams.set("code_challenge", codeChallenge);

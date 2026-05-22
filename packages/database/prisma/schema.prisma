@@ -9,9 +9,7 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_DATABASE_URL")
+  provider = "postgresql"
 }
 
 model Session {
@@ -22,6 +20,21 @@ model Session {
   updatedAt DateTime @updatedAt
   messages  Json     @default("[]")
   @@index([userId])
+}
+
+// Security-sensitive event log: logout, session create, billing actions,
+// credit-gate denials. Intended for forensics and abuse investigation, not
+// per-request access logging (pino covers that). Additive — no existing
+// model references it.
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String
+  action    String
+  requestId String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
 }
 
 // Outbox for Polar usage ingest events that failed inline. A background

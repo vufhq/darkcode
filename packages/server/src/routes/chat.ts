@@ -25,6 +25,7 @@ import { ingestAiUsageWithOutbox } from "../lib/polar-outbox";
 import { claimIdempotencyKey } from "../lib/idempotency";
 import { calculateCreditsForUsage } from "../lib/credits";
 import { captureException } from "../lib/sentry";
+import { logAuditEvent } from "../lib/audit";
 import {
   ApiKeyRequiredError,
   isSupportedChatModel,
@@ -115,6 +116,7 @@ const app = new Hono<AuthenticatedEnv>()
         try {
           const creditsBalance = await getAvailableCreditsBalance(userId);
           if (creditsBalance <= 0) {
+            void logAuditEvent({ userId, action: "credits.depleted", requestId });
             return c.json(
               { error: "No credits remaining. Run /upgrade to buy more credits." },
               402,

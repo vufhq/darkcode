@@ -1,9 +1,9 @@
 import { Hono } from "hono";
-// import { HTTPException } from "hono/http-exception";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { db } from "@darkcode/database/client";
 
+import { logAuditEvent } from "../lib/audit";
 import type { AuthenticatedEnv } from "../middleware/require-auth";
 
 
@@ -75,6 +75,13 @@ const app = new Hono<AuthenticatedEnv>()
         ...data,
         userId,
       },
+    });
+
+    void logAuditEvent({
+      userId,
+      action: "session.create",
+      requestId: c.get("requestId"),
+      metadata: { sessionId: session.id },
     });
 
     return c.json(session, 201);

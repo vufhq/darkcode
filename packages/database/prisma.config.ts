@@ -13,6 +13,10 @@ export default defineConfig({
     path: "prisma/migrations",
   },
   datasource: {
+    // Pooled connection used for runtime queries. Migrate uses directUrl
+    // when set so it can run statements PgBouncer's transaction pool
+    // rejects (CREATE INDEX CONCURRENTLY, advisory locks, etc).
     url: env("DATABASE_URL"),
+    directUrl: process.env.DIRECT_DATABASE_URL,
   },
 });
