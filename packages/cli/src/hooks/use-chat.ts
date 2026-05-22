@@ -12,6 +12,7 @@ import { apiClient } from "../lib/api-client";
 import { getAuth } from "../lib/auth";
 import { getAllApiKeys } from "../lib/api-keys";
 import { executeLocalTool } from "../lib/local-tools";
+import { captureCliException } from "../lib/sentry";
 
 export type ChatMessageMetadata = {
   mode?: ModeType;
@@ -90,14 +91,19 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
             output,
           }),
         )
-        .catch((error) =>
+        .catch((error) => {
+          captureCliException(error, {
+            toolName: toolCall.toolName,
+            toolCallId: toolCall.toolCallId,
+            sessionId,
+          });
           chat.addToolOutput({
             tool: toolCall.toolName as keyof ChatTools,
             toolCallId: toolCall.toolCallId,
             state: "output-error",
             errorText: error instanceof Error ? error.message : String(error),
-          }),
-        );
+          });
+        });
     },
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
   });

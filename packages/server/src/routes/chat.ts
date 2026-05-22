@@ -22,6 +22,7 @@ import { buildSystemPrompt } from "../system-prompt";
 import type { AuthenticatedEnv } from "../middleware/require-auth";
 import { getAvailableCreditsBalance, ingestAiUsage } from "../lib/polar";
 import { calculateCreditsForUsage } from "../lib/credits";
+import { captureException } from "../lib/sentry";
 import {
   ApiKeyRequiredError,
   isSupportedChatModel,
@@ -83,6 +84,8 @@ const app = new Hono<AuthenticatedEnv>()
     submitValidator,
     async (c) => {
       const userId = c.get("userId");
+      const log = c.get("log");
+      const requestId = c.get("requestId");
       const { id, messages, mode, model } = c.req.valid("json");
 
       const modelDefinition = findSupportedChatModel(model);
@@ -101,7 +104,9 @@ const app = new Hono<AuthenticatedEnv>()
               402,
             );
           }
-        } catch {
+        } catch (error) {
+          log.error({ err: error }, "credits_balance_unavailable");
+          captureException(error, { userId, requestId, tags: { kind: "polar_balance" } });
           return c.json({ error: "Unable to verify credits balance right now." }, 503);
         }
       }
@@ -214,11 +219,19 @@ const app = new Hono<AuthenticatedEnv>()
               credits: billableUsage.credits,
             });
           } catch (error) {
-            console.error("Failed to ingest Polar AI usage for chat message", {
-              error,
-              sessionId: id,
-              messageId: event.responseMessage.id,
+            log.error(
+              {
+                err: error,
+                sessionId: id,
+                messageId: event.responseMessage.id,
+              },
+              "polar_ingest_failed",
+            );
+            captureException(error, {
               userId,
+              requestId,
+              tags: { kind: "polar_ingest" },
+              extra: { sessionId: id, messageId: event.responseMessage.id },
             });
           }
         },

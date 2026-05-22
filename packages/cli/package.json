@@ -23,6 +23,7 @@
     "@darkcode/shared": "workspace:*",
     "@opentui/core": "^0.1.97",
     "@opentui/react": "^0.1.97",
+    "@sentry/node": "^10.53.1",
     "ai": "^6.0.184",
     "date-fns": "^4.1.0",
     "hono": "^4.12.12",
