@@ -1,0 +1,22 @@
+# Railway deploy config for the @darkcode/server image. The CLI ships via
+# `bun link` on the developer's machine and isn't deployed here.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# /healthz returns 200 as long as the event loop responds. Failing this
+# triggers a restart.
+healthcheckPath = "/healthz"
+healthcheckTimeout = 10
+
+# Restart on crash but not on every clean exit — gives gracefulShutdown
+# a chance to finish, and surfaces deliberate exits as deploy failures.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# Single replica by default. Bump this once REDIS_URL is set in the
+# environment — the in-memory rate-limit + idempotency fallbacks are
+# single-instance only.
+numReplicas = 1

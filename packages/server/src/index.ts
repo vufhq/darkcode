@@ -127,6 +127,25 @@ logger.info(
   "server.start",
 );
 
+// Loud, deliberate warnings for production misconfiguration that won't
+// crash the process but will hurt in real ways:
+//   - No Redis → rate limits and idempotency keys are per-instance only.
+//     A multi-replica deploy effectively has no protection.
+//   - CORS '*' → any origin can hit authenticated endpoints (with credentials
+//     disabled this is less bad, but still surprising in prod).
+//   - No Sentry → unhandled errors disappear into pino logs only.
+if (isProduction) {
+  if (!env.REDIS_URL) {
+    logger.warn("production.redis_missing — rate limits + idempotency are single-instance only");
+  }
+  if (corsAllowAll) {
+    logger.warn("production.cors_wildcard — CORS_ORIGINS=* in production; lock this down");
+  }
+  if (!env.SENTRY_DSN) {
+    logger.warn("production.sentry_missing — unhandled errors will not be captured");
+  }
+}
+
 // ---------- graceful shutdown ----------
 const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS ?? "30000");
 let shuttingDown = false;
