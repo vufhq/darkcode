@@ -7,7 +7,13 @@ import {
   type LanguageModelUsage,
   type UIMessage,
 } from "ai";
-import { type ModeType, type SupportedChatModelId, type ToolContracts } from "@darkcode/shared";
+import {
+  BYOK_PROVIDERS,
+  BYOK_PROVIDER_HEADER,
+  type ModeType,
+  type SupportedChatModelId,
+  type ToolContracts,
+} from "@darkcode/shared";
 import { apiClient } from "../lib/api-client";
 import { getAuth } from "../lib/auth";
 import { getAllApiKeys } from "../lib/api-keys";
@@ -43,11 +49,11 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
         // Forward locally stored BYOK keys for non-DarkCode models. The server
         // ignores them when using the hosted model, so it's safe to always send.
         const apiKeys = getAllApiKeys();
-        if (apiKeys.anthropic) {
-          headers.set("x-darkcode-anthropic-key", apiKeys.anthropic);
-        }
-        if (apiKeys.openai) {
-          headers.set("x-darkcode-openai-key", apiKeys.openai);
+        for (const provider of BYOK_PROVIDERS) {
+          const key = apiKeys[provider];
+          if (key) {
+            headers.set(BYOK_PROVIDER_HEADER[provider], key);
+          }
         }
         return headers;
       },

@@ -5,16 +5,15 @@ import { useDialog } from "../../providers/dialog";
 import { useToast } from "../../providers/toast";
 import { useKeyboardLayer } from "../../providers/keyboard-layer";
 import { setApiKey } from "../../lib/api-keys";
-import type { ByokProvider } from "@darkcode/shared";
+import {
+  BYOK_PROVIDER_KEY_PLACEHOLDER,
+  BYOK_PROVIDER_LABELS,
+  type ByokProvider,
+} from "@darkcode/shared";
 
 type ApiKeyDialogContentProps = {
   provider: ByokProvider;
   onSaved?: () => void;
-};
-
-const PROVIDER_LABELS: Record<ByokProvider, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
 };
 
 export function ApiKeyDialogContent({ provider, onSaved }: ApiKeyDialogContentProps) {
@@ -34,7 +33,7 @@ export function ApiKeyDialogContent({ provider, onSaved }: ApiKeyDialogContentPr
     setApiKey(provider, trimmed);
     toast.show({
       variant: "success",
-      message: `Saved ${PROVIDER_LABELS[provider]} API key`,
+      message: `Saved ${BYOK_PROVIDER_LABELS[provider]} API key`,
     });
     dialog.close();
     onSaved?.();
@@ -51,13 +50,13 @@ export function ApiKeyDialogContent({ provider, onSaved }: ApiKeyDialogContentPr
   return (
     <box flexDirection="column" gap={1}>
       <text attributes={TextAttributes.DIM}>
-        Paste your {PROVIDER_LABELS[provider]} API key. Stored locally at
+        Paste your {BYOK_PROVIDER_LABELS[provider]} API key. Stored locally at
         ~/.darkcode/api-keys.json
       </text>
       <input
         ref={inputRef}
         focused
-        placeholder={provider === "anthropic" ? "sk-ant-..." : "sk-..."}
+        placeholder={BYOK_PROVIDER_KEY_PLACEHOLDER[provider]}
         onContentChange={() => setValue(inputRef.current?.value ?? "")}
       />
       <text attributes={TextAttributes.DIM}>enter to save · esc to cancel</text>

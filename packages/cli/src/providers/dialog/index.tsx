@@ -30,7 +30,10 @@ export function DialogProvider({ children }: DialogProviderProps) {
   const { push, pop } = useKeyboardLayer();
 
   const close = useCallback(() => {
-    setCurrentDialog(null);
+    setCurrentDialog((existing) => {
+      existing?.onClose?.();
+      return null;
+    });
     pop("dialog");
   }, [pop]);
 

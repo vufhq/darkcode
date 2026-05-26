@@ -2,6 +2,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import {
   findSupportedChatModel,
+  type ByokProvider,
   type SupportedChatModel,
   type SupportedChatModelId,
   type SupportedProvider,
@@ -12,6 +13,7 @@ import type { LanguageModel } from "ai";
 type AnthropicModelId = Extract<SupportedChatModel, { provider: "anthropic" }>["id"];
 type OpenAIModelId = Extract<SupportedChatModel, { provider: "openai" }>["id"];
 type DarkcodeModelId = Extract<SupportedChatModel, { provider: "darkcode" }>["id"];
+type OpenAICompatibleModel = Extract<SupportedChatModel, { provider: "openai-compatible" }>;
 
 export type ResolvedModel = {
   model: LanguageModel;
@@ -88,6 +90,23 @@ function resolveOpenAIModel(modelId: OpenAIModelId, apiKey: string): ResolvedMod
   };
 }
 
+function resolveOpenAICompatibleModel(
+  model: OpenAICompatibleModel,
+  apiKey: string,
+): ResolvedModel {
+  const provider = createOpenAI({
+    apiKey,
+    baseURL: model.baseUrl,
+  });
+
+  return {
+    model: provider.chat(model.upstreamModelId),
+    provider: "openai-compatible",
+    modelId: model.id,
+    isMetered: false,
+  };
+}
+
 function resolveDarkcodeModel(modelId: DarkcodeModelId): ResolvedModel {
   const apiKey = env.MOONSHOT_API_KEY;
 
@@ -131,10 +150,7 @@ function resolveDarkcodeModel(modelId: DarkcodeModelId): ResolvedModel {
   };
 }
 
-export type ProviderApiKeys = {
-  anthropic?: string;
-  openai?: string;
-};
+export type ProviderApiKeys = Partial<Record<ByokProvider, string>>;
 
 function resolveSupportedChatModel(
   model: SupportedChatModel,
@@ -159,13 +175,20 @@ function resolveSupportedChatModel(
       }
       return resolveOpenAIModel(model.id, apiKey);
     }
+    case "openai-compatible": {
+      const apiKey = apiKeys[model.byokProvider];
+      if (!apiKey) {
+        throw new ApiKeyRequiredError(model.byokProvider);
+      }
+      return resolveOpenAICompatibleModel(model, apiKey);
+    }
     default:
       return assertUnsupportedProvider(provider);
   }
 }
 
 export class ApiKeyRequiredError extends Error {
-  constructor(public readonly provider: SupportedProvider) {
+  constructor(public readonly provider: ByokProvider) {
     super(`Missing API key for provider: ${provider}`);
     this.name = "ApiKeyRequiredError";
   }

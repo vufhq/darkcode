@@ -12,6 +12,8 @@ import {
 import { db } from "@darkcode/database/client";
 import type { Prisma } from "@darkcode/database";
 import {
+  BYOK_PROVIDERS,
+  BYOK_PROVIDER_HEADER,
   findSupportedChatModel,
   getToolContracts,
   modeSchema,
@@ -73,12 +75,14 @@ function hasPendingToolCalls(message: DarkcodeUIMessage) {
 };
 
 function readApiKeysFromHeaders(headers: Headers): ProviderApiKeys {
-  const anthropic = headers.get("x-darkcode-anthropic-key") ?? undefined;
-  const openai = headers.get("x-darkcode-openai-key") ?? undefined;
-  return {
-    anthropic: anthropic && anthropic.length > 0 ? anthropic : undefined,
-    openai: openai && openai.length > 0 ? openai : undefined,
-  };
+  const apiKeys: ProviderApiKeys = {};
+  for (const provider of BYOK_PROVIDERS) {
+    const value = headers.get(BYOK_PROVIDER_HEADER[provider]);
+    if (value && value.length > 0) {
+      apiKeys[provider] = value;
+    }
+  }
+  return apiKeys;
 }
 
 const app = new Hono<AuthenticatedEnv>()

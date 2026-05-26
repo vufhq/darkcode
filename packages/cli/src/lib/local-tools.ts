@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, stat, writeFile } from "fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { toolInputSchemas, Mode, type ModeType } from "@darkcode/shared";
+import { checkPermission } from "./permissions/engine";
 
 const MAX_FILE_SIZE = 10_000;
 const MAX_RESULTS = 200;
@@ -123,6 +124,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
     case "writeFile": {
       const { path, content } = toolInputSchemas.writeFile.parse(input);
       const { cwd, resolved } = resolveInsideCwd(path);
+      await checkPermission({ kind: "fs", projectRelativePath: relative(cwd, resolved) });
       await mkdir(dirname(resolved), { recursive: true });
       await writeFile(resolved, content, "utf-8");
       return {
@@ -134,6 +136,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
     case "editFile": {
       const { path, oldString, newString } = toolInputSchemas.editFile.parse(input);
       const { cwd, resolved } = resolveInsideCwd(path);
+      await checkPermission({ kind: "fs", projectRelativePath: relative(cwd, resolved) });
       const content = await readFile(resolved, "utf-8");
       const occurrences = content.split(oldString).length - 1;
 
@@ -145,6 +148,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
     }
     case "bash": {
       const { command, timeout = DEFAULT_TIMEOUT } = toolInputSchemas.bash.parse(input);
+      await checkPermission({ kind: "bash", command });
       const proc = Bun.spawn(["bash", "-c", command], {
         cwd: resolveInsideCwd(".").resolved,
         stdout: "pipe",

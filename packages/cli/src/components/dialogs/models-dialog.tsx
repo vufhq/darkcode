@@ -6,7 +6,6 @@ import { DialogSearchList } from "../dialog-search-list";
 import {
   findSupportedChatModel,
   getModelDisplayName,
-  type ByokProvider,
   type SupportedChatModelId,
 } from "@darkcode/shared";
 import { getApiKey } from "../../lib/api-keys";
@@ -32,7 +31,7 @@ export const ModelsDialogContent = ({
       if (!definition) return;
 
       if (definition.requiresApiKey) {
-        const provider = definition.provider as ByokProvider;
+        const provider = definition.byokProvider;
         if (!getApiKey(provider)) {
           dialog.open({
             title: `Add ${provider} API key`,
@@ -74,9 +73,10 @@ export const ModelsDialogContent = ({
         const definition = findSupportedChatModel(modelId);
         const isCurrent = modelId === currentModel;
         const requiresKey = definition?.requiresApiKey ?? false;
-        const hasKey = requiresKey
-          ? getApiKey((definition!.provider as ByokProvider)) != null
-          : true;
+        const hasKey =
+          requiresKey && definition && definition.requiresApiKey
+            ? getApiKey(definition.byokProvider) != null
+            : true;
 
         const tag = !requiresKey
           ? "Hosted"

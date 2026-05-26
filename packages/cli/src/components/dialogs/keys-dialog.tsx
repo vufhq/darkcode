@@ -5,17 +5,21 @@ import { useToast } from "../../providers/toast";
 import { DialogSearchList } from "../dialog-search-list";
 import { ApiKeyDialogContent } from "./api-key-dialog";
 import { clearApiKey, getApiKey } from "../../lib/api-keys";
-import type { ByokProvider } from "@darkcode/shared";
+import {
+  BYOK_PROVIDERS,
+  BYOK_PROVIDER_LABELS,
+  type ByokProvider,
+} from "@darkcode/shared";
 
 type ProviderRow = {
   provider: ByokProvider;
   label: string;
 };
 
-const PROVIDERS: ProviderRow[] = [
-  { provider: "anthropic", label: "Anthropic" },
-  { provider: "openai", label: "OpenAI" },
-];
+const PROVIDERS: ProviderRow[] = BYOK_PROVIDERS.map((provider) => ({
+  provider,
+  label: BYOK_PROVIDER_LABELS[provider],
+}));
 
 export function KeysDialogContent() {
   const dialog = useDialog();
