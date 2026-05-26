@@ -84,6 +84,10 @@ app.use("/sessions/*", requireAuth);
 app.use("/chat/*", requireAuth);
 app.use("/billing/checkout", requireAuth);
 app.use("/billing/portal", requireAuth);
+app.use("/billing/balance", requireAuth);
+app.use("/billing/usage", requireAuth);
+app.use("/billing/subscription", requireAuth);
+app.use("/billing/transactions", requireAuth);
 
 app.use(
   "/sessions/*",

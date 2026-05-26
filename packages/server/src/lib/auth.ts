@@ -7,8 +7,11 @@ const clerkClient = createClerkClient({
 });
 
 export async function authenticateOAuthRequest(request: Request) {
+  // Accept both Clerk OAuth tokens (used by the CLI's device-code flow) and
+  // session JWTs (used by the website's @clerk/clerk-react SDK). The two
+  // surfaces share the same Clerk user, so userId resolution is identical.
   const requestState = await clerkClient.authenticateRequest(request, {
-    acceptsToken: "oauth_token",
+    acceptsToken: ["oauth_token", "session_token"],
   });
 
   if (!requestState.isAuthenticated) {
@@ -16,7 +19,7 @@ export async function authenticateOAuthRequest(request: Request) {
   }
 
   const auth = requestState.toAuth();
-  if (auth.tokenType !== "oauth_token" || !auth.userId) {
+  if (!auth.userId) {
     return null;
   }
 

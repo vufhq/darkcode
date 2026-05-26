@@ -22,17 +22,27 @@ const app = new Hono<AuthenticatedEnv>()
   .get("/", async (c) => {
     const userId = c.get("userId");
 
-    const sessions = await db.session.findMany({
+    const rows = await db.session.findMany({
       where: { userId },
-      orderBy: { createdAt: "desc" },
+      orderBy: { updatedAt: "desc" },
       select: {
         id: true,
         title: true,
         createdAt: true,
+        updatedAt: true,
       },
     });
 
-    return c.json(sessions);
+    // Shape matches the website's `SessionRecord` contract: a wrapped array
+    // and `lastActivityAt` (which we source from Prisma's `updatedAt`).
+    const sessions = rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      createdAt: row.createdAt.toISOString(),
+      lastActivityAt: row.updatedAt.toISOString(),
+    }));
+
+    return c.json({ sessions });
   })
   .get("/:id", async (c) => {
     // MOCK: Uncomment to simulate slow session loading

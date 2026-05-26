@@ -34,6 +34,11 @@ const schema = z.object({
   POLAR_SERVER: z.enum(["sandbox", "production"]).default("sandbox"),
   POLAR_CREDITS_METER_ID: NonEmpty,
 
+  // Public URL of the website (no trailing slash). Used as the Polar
+  // checkout success/return URL so users land back on /dashboard/billing
+  // after paying, where the page refreshes the credit balance.
+  WEBSITE_URL: z.string().url().default("http://localhost:5173"),
+
   // Observability (optional)
   SENTRY_DSN: Optional,
   SENTRY_RELEASE: Optional,
