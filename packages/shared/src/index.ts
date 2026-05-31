@@ -9,6 +9,8 @@ export {
   getModelDisplayName,
   modelRequiresApiKey,
   getModelByokProvider,
+  getModelContextWindow,
+  getModelFallbackId,
   type ModelPricing,
   type SupportedProvider,
   type SupportedChatModel,

@@ -4,3 +4,6 @@ export { AgentsDialogContent } from "./agents-dialog";
 export { ModelsDialogContent } from "./models-dialog";
 export { ApiKeyDialogContent } from "./api-key-dialog";
 export { KeysDialogContent } from "./keys-dialog";
+export { AuditDialogContent } from "./audit-dialog";
+export { PermissionsDialogContent } from "./permissions-dialog";
+export { McpDialogContent } from "./mcp-dialog";

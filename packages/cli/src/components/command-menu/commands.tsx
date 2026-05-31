@@ -1,8 +1,11 @@
 import { SUPPORTED_CHAT_MODELS } from "@darkcode/shared";
-import { 
+import {
   AgentsDialogContent,
+  AuditDialogContent,
   KeysDialogContent,
+  McpDialogContent,
   ModelsDialogContent,
+  PermissionsDialogContent,
   SessionsDialogContent,
   ThemeDialogContent,
 } from "../dialogs";
@@ -12,6 +15,8 @@ import { performLogin } from "../../lib/oauth";
 import { clearAuth } from "../../lib/auth";
 
 import { openBillingPortal, openUpgradeCheckout } from "../../lib/upgrade";
+import { apiClient } from "../../lib/api-client";
+import { getErrorMessage } from "../../lib/http-errors";
 
 export const COMMANDS: Command[] = [
   {
@@ -147,6 +152,113 @@ export const COMMANDS: Command[] = [
         const message = error instanceof Error ? error.message : "Failed to open billing portal";
         ctx.toast.show({ variant: "error", message });
       }
+    },
+  },
+  {
+    name: "compact",
+    description: "Summarize earlier turns to free up context window",
+    value: "/compact",
+    action: async (ctx) => {
+      if (!ctx.sessionId) {
+        ctx.toast.show({
+          variant: "error",
+          message: "Open a session before running /compact",
+        });
+        return;
+      }
+      ctx.toast.show({ message: "Compacting session..." });
+      try {
+        const res = await apiClient.sessions[":id"].compact.$post({
+          param: { id: ctx.sessionId },
+          json: {},
+        });
+        if (!res.ok) throw new Error(await getErrorMessage(res));
+        const data = await res.json();
+        if (!data.compacted) {
+          ctx.toast.show({ message: "Nothing to compact yet" });
+          return;
+        }
+        ctx.toast.show({
+          variant: "success",
+          message: `Summarized ${data.droppedCount} earlier ${
+            data.droppedCount === 1 ? "message" : "messages"
+          }`,
+        });
+      } catch (error) {
+        ctx.toast.show({
+          variant: "error",
+          message: error instanceof Error ? error.message : "Compaction failed",
+        });
+      }
+    },
+  },
+  {
+    name: "mcp",
+    description: "Browse configured MCP servers and their tools",
+    value: "/mcp",
+    action: (ctx) => {
+      ctx.dialog.open({
+        title: "MCP Servers",
+        children: <McpDialogContent />,
+      });
+    },
+  },
+  {
+    name: "permissions",
+    description: "Show the effective permission policy",
+    value: "/permissions",
+    action: (ctx) => {
+      ctx.dialog.open({
+        title: "Permissions",
+        children: <PermissionsDialogContent />,
+      });
+    },
+  },
+  {
+    name: "audit",
+    description: "View recent permission decisions",
+    value: "/audit",
+    action: (ctx) => {
+      ctx.dialog.open({
+        title: "Audit Log",
+        children: <AuditDialogContent />,
+      });
+    },
+  },
+  {
+    name: "yolo",
+    description: "Auto-allow every tool call (use with care)",
+    value: "/yolo",
+    action: (ctx) => {
+      ctx.setPosture("yolo");
+      ctx.toast.show({
+        variant: "error",
+        message: "YOLO mode on — every tool call is auto-allowed",
+      });
+    },
+  },
+  {
+    name: "auto-edit",
+    description: "Auto-allow file writes; keep bash and MCP gated",
+    value: "/auto-edit",
+    action: (ctx) => {
+      ctx.setPosture("auto-edit");
+      ctx.toast.show({
+        variant: "success",
+        message: "Auto-edit mode on — file writes will skip the prompt",
+      });
+    },
+  },
+  {
+    name: "safe",
+    description: "Return to the default prompt-on-write posture",
+    value: "/safe",
+    action: (ctx) => {
+      ctx.setPosture("normal");
+      ctx.toast.show({
+        variant: "success",
+        message: "Safe mode — every side-effecting tool will prompt",
+      });
     },
   },
   {

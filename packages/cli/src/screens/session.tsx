@@ -5,10 +5,11 @@ import { useKeyboard } from "@opentui/react";
 import { type ModeType, type SupportedChatModelId } from "@darkcode/shared";
 import type { InferResponseType } from "hono/client";
 import { SessionShell } from "../components/session-shell";
-import { 
-  UserMessage, 
-  BotMessage, 
-  ErrorMessage
+import {
+  UserMessage,
+  BotMessage,
+  ErrorMessage,
+  CompactionDivider,
 } from "../components/messages";
 import { useToast } from "../providers/toast";
 import { useChat } from "../hooks/use-chat";
@@ -45,14 +46,22 @@ function ChatMessage(
     return <UserMessage message={text} mode={msg.metadata?.mode ?? "BUILD"} />;
   }
 
+  // When this turn triggered compaction, surface it as a divider directly
+  // above the assistant response so the user sees "earlier turns were
+  // summarized" in context, not buried in a status bar.
+  const compaction = msg.metadata?.compaction;
   return (
-    <BotMessage
-      parts={msg.parts}
-      model={msg.metadata?.model ?? "unknown"}
-      mode={msg.metadata?.mode ?? "BUILD"}
-      durationMs={msg.metadata?.durationMs}
-      streaming={false}
-    />
+    <>
+      {compaction ? <CompactionDivider droppedCount={compaction.droppedCount} /> : null}
+      <BotMessage
+        parts={msg.parts}
+        model={msg.metadata?.model ?? "unknown"}
+        mode={msg.metadata?.mode ?? "BUILD"}
+        durationMs={msg.metadata?.durationMs}
+        contextUsage={msg.metadata?.contextUsage}
+        streaming={false}
+      />
+    </>
   );
 };
 
@@ -64,7 +73,7 @@ function SessionChat({
   initialPrompt?: { message: string; mode: ModeType; model: SupportedChatModelId };
 }) {
   const [initialMessages] = useState(() => session.messages as unknown as Message[]);
-  const { mode, model } = usePromptConfig();
+  const { mode, model, setContextUsage } = usePromptConfig();
   const { isTopLayer } = useKeyboardLayer();
   const { messages, status, submit, abort, interrupt, error } = useChat(
     session.id,
@@ -76,8 +85,21 @@ function SessionChat({
   useEffect(() => {
     return () => {
       void abort();
+      setContextUsage(null);
     };
-  }, [abort]);
+  }, [abort, setContextUsage]);
+
+  // Surface the latest turn's context usage into the status bar.
+  useEffect(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const usage = messages[i]?.metadata?.contextUsage;
+      if (usage) {
+        setContextUsage(usage);
+        return;
+      }
+    }
+    setContextUsage(null);
+  }, [messages, setContextUsage]);
 
   // Let the user cancel a reply even before the first streamed chunk arrives.
   useKeyboard((key) => {

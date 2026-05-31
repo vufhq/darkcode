@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 DarkCode is a terminal-based AI coding agent. A Bun-powered OpenTUI/React CLI talks to a Hono API that streams model output via the Vercel AI SDK, persists sessions in Postgres via Prisma, authenticates users through Clerk OAuth (PKCE browser flow), and meters AI usage as credits through Polar.
 
-This repo is also a tutorial — branches `01-…` through `11-…` each represent a chapter; `main` is the final state. Avoid landing changes that only make sense at the end on earlier chapter branches.
+It started as a tutorial repo, but `master` now carries a larger feature build-out layered on the base: **multi-model BYOK** (Anthropic/OpenAI/DeepSeek/Google/Ollama), a **client-side permission engine**, **server-side context compaction**, a **CLI-side LSP pool**, and a **CLI-side MCP host**. The roadmap and design rationale live in `darkcode-cli-implementation-plan.md`; per-phase build agents live in `.claude/agents/darkcode-p*.md`. **Read "Feature status" below before starting new work — several phases are partial or unimplemented.**
 
 ## Common commands
 
@@ -18,69 +18,111 @@ Run from the repo root unless noted:
 | `bun run dev:server` | Hono API on `http://localhost:3000`, hot reload |
 | `bun run dev:cli` | CLI in watch mode (run in a second terminal — needs server up) |
 | `bun run build:cli` | Build the CLI package |
+| `bun test` | Run the test suite (permission classifiers; uses `bun:test`) |
 | `bun run link:cli` | Build and `bun link` the `darkcode` executable globally |
 | `bun run --cwd packages/database db:generate` | Regenerate the Prisma client (run after schema edits) |
 | `bun run --cwd packages/database db:push` | Push the Prisma schema to the configured Postgres |
 
-There is no test, lint, or typecheck script wired up — TypeScript runs in `noEmit` mode via the editor / Bun.
+**Typecheck (no script wired up):** `bunx tsc --noEmit -p packages/server/tsconfig.json` and `... packages/cli/tsconfig.json`. The **only** expected errors are two pre-existing `packages/server/src/lib/polar.ts` Polar-SDK type-drift lines — ignore those; treat anything else as yours to fix.
+
+**Tests:** `bun test` (from the repo root, or scoped, e.g. `bun test packages/server`). Uses `bun:test`; `*.test.ts` are colocated next to source. Covered so far: the CLI **permission classifiers** (`bash-classifier`/`mcp-classifier`/`path-guards`) and the server **billing path** (`credits` credit math, `token-estimate` compaction gate, `routes/credit-fallback` the credit-depleted BYOK-fallback decision + registry invariants, and `polar-outbox` retry — isolated via `mock.module` so it needs no env/DB/Polar). Broader coverage (routes end-to-end, etc.) is still Phase 8 work. There is no lint setup. When you touch types, also rely on `tsc`/editor diagnostics.
+
+Note: server modules import `lib/env.ts`, which **throws at import** if required env vars are missing — so a server unit test can only import modules whose transitive graph avoids `env` (pure libs like `credits`/`token-estimate`, or `@darkcode/shared`), OR must mock the env-touching deps (`./polar`, the db client, `./logger`, `./sentry`) before importing, as `polar-outbox.test.ts` does.
 
 The server's `postinstall` automatically runs `db:generate` in `packages/database`.
 
+Platform note: development happens on **Windows**. Prefer cross-platform Node/Bun APIs over shelling out to Unix-only binaries (this has already bitten the LSP layer — see Known issues).
+
 ## Architecture
 
-Bun workspace with four packages in `packages/*`. Cross-package imports use the `@darkcode/*` workspace specifiers.
+Bun workspace with four packages in `packages/*`. Cross-package imports use the `@darkcode/*` workspace specifiers. **Tool dispatch is client-side**: the server only declares tool schemas; the CLI executes everything (fs, bash, LSP, MCP) against the user's real `process.cwd()` and posts results back. New capabilities (LSP, MCP) follow this rule and run CLI-side so the server stays stateless.
 
 ### `@darkcode/shared` — the contract between CLI and server
 
-- `schemas.ts` defines `Mode` (`BUILD` | `PLAN`) and the AI SDK `tool()` contracts. `readOnlyToolContracts` (`readFile`, `listDirectory`, `glob`, `grep`) is exposed in PLAN mode; `buildToolContracts` adds `writeFile`, `editFile`, `bash` for BUILD. `getToolContracts(mode)` is the single source of truth — both server (for `streamText`) and CLI (for local execution dispatch) consume it.
-- `models.ts` is the model registry: `SUPPORTED_CHAT_MODELS`, `DEFAULT_CHAT_MODEL_ID`, helpers (`findSupportedChatModel`, `modelRequiresApiKey`), and the `ByokProvider` / `ModelPricing` types. **Adding/changing a model goes here.**
+- `schemas.ts` defines `Mode` (`BUILD` | `PLAN`) and the AI SDK `tool()` contracts. `readOnlyToolContracts` = `readFile`, `listDirectory`, `glob`, `grep` **+ the read-only LSP tools** (`lspDefinition`, `lspReferences`, `lspHover`, `lspDiagnostics`) — available in **both** modes. `buildToolContracts` adds `writeFile`, `editFile`, `bash`. `getToolContracts(mode)` is the single source of truth — server (`streamText` + `validateUIMessages`) and CLI (dispatch) both consume it.
+- `models.ts` is the model registry and the **single source of truth for models**. `SupportedProvider` = `darkcode | anthropic | openai | openai-compatible | google | ollama`. `ByokProvider` = `anthropic | openai | deepseek | google | ollama` (ollama is keyless — included only for uniform typing). Each entry is a discriminated-union variant with `pricing`, `contextWindow`, optional `fallback`. Helpers: `findSupportedChatModel`, `modelRequiresApiKey`, `getModelByokProvider`, `getModelContextWindow`, `getModelFallbackId`. **Adding/changing a model goes here**, plus a resolver branch in `server/lib/models.ts`.
 
 ### `@darkcode/server` — Hono API (`packages/server/src`)
 
-- `index.ts` mounts `/auth`, `/billing`, `/sessions`, `/chat`. `requireAuth` middleware guards everything except `/auth` and the Polar webhook endpoints under `/billing`. `idleTimeout: 255` is intentionally high so long-running LLM tool calls don't get cut.
-- `routes/chat.ts` is the heart of the system. It:
-  1. Looks up the model in the shared registry; for hosted (non-BYOK) models it gates on Polar credits via `getAvailableCreditsBalance`.
-  2. Loads the session, merges incoming messages with persisted history by `id`, validates with `validateUIMessages` against the tool contracts for the current mode.
-  3. Calls `streamText` with `buildSystemPrompt({ mode, model })`, the resolved provider model, and the mode-appropriate tools.
-  4. Streams back as `UIMessageStreamResponse` with metadata (`mode`, `model`, `durationMs`, `usage`).
-  5. On finish: persists `event.messages` to `session.messages` (Json column) only when there are no pending tool calls, then ingests a Polar `darkcode_usage` event via `calculateCreditsForUsage` for metered models.
-- `lib/models.ts` — `resolveChatModel(modelId, apiKeys)` returns the AI SDK model instance plus `providerOptions`, `isMetered`, and `provider`. BYOK keys arrive as `x-darkcode-anthropic-key` / `x-darkcode-openai-key` headers, read in `readApiKeysFromHeaders`. A missing key for a BYOK model throws `ApiKeyRequiredError`, which the route maps to a 400 telling the user to run `/keys`.
-- `lib/polar.ts` + `lib/credits.ts` — credit math and Polar SDK calls. Event shape must stay exactly `{ name: "darkcode_usage", metadata: { credits } }` to match the meter filter set up in the Polar dashboard.
-- `system-prompt.ts` builds the system prompt per `(mode, model)`.
-- Error handling in `index.ts` re-surfaces `AI_APICallError` as 502 and other thrown errors with full message — tighten before public deployment.
+- `index.ts` mounts `/auth`, `/billing`, `/sessions`, `/chat`, `/health`. `requireAuth` guards everything except `/auth` and the Polar webhooks. Per-route rate limits + body limits; graceful shutdown; production misconfig warnings. `idleTimeout: 255` is intentionally high so long tool calls aren't cut. There is **no** `/attach` or `/pair` route (Phase 7 unimplemented).
+- `routes/chat.ts` is the heart of the system. Per turn it:
+  1. Looks up the model; for hosted (non-BYOK) models gates on Polar credits. **Credit-depleted fallback:** if the hosted model has a `fallback` and the user has that provider's BYOK key, it swaps to the fallback instead of refusing (the fallback is BYOK, so not metered).
+  2. Merges incoming messages into both `session.messages` (raw, append-only) and `session.workingMessages` (what's sent to the model).
+  3. **Compaction:** estimates `projectedNextRequestTokens`; if `>= 75%` of the model's `contextWindow`, compacts synchronously before the call. If still over the window after compacting, returns a structured **400 overflow refusal** rather than letting the provider error leak.
+  4. Merges **MCP tools** (sent by the CLI in the request body as `mcpTools`) into the static contracts before `streamText` + `validateUIMessages`.
+  5. `streamText` with `buildSystemPrompt({ mode, model, compactionSummary })`; streams `UIMessageStreamResponse` with metadata (`mode`, `model`, `durationMs`, `usage`, `compaction`, `contextUsage`).
+  6. On finish (no pending tool calls): persists raw + working messages, and ingests a Polar `darkcode_usage` event for metered models only.
+- `lib/models.ts` — `resolveChatModel(modelId, apiKeys)` → AI SDK model + `providerOptions` + `isMetered` + `provider`. Branches per provider: native Anthropic/OpenAI, `createOpenAI({baseURL})` for openai-compatible (DeepSeek) and Ollama (`OLLAMA_BASE_URL`, dummy key, `OLLAMA_DEFAULT_MODEL` override), `createGoogleGenerativeAI` for Gemini, and the Moonshot-backed `darkcode` model (with a fetch interceptor that disables Kimi thinking). BYOK keys arrive as `x-darkcode-<provider>-key` headers. Missing key → `ApiKeyRequiredError` → route 400 telling the user to run `/keys`.
+- `lib/compaction.ts` — `compactWorkingContext()`: pins the last N=10 messages (+ `pinnedMessageIds`), summarizes the older range with the active model into a structured digest, returns the trimmed window + digest + `droppedCount`. The digest is injected into the **system prompt**, not the message array, so it survives the next pass.
+- `lib/token-estimate.ts` — 4-chars/token heuristic; gates compaction only (billing uses provider `usage`).
+- `lib/safe-error.ts` — strips provider request bodies out of `AI_APICallError` messages so the conversation isn't leaked back to the CLI as an error.
+- `routes/sessions.ts` — CRUD + `POST /:id/compact` (the `/compact` command).
+- `lib/polar.ts` + `lib/credits.ts` + `lib/polar-outbox.ts` — credit math + Polar SDK + a Postgres outbox that retries failed usage ingests. Event shape must stay exactly `{ name: "darkcode_usage", metadata: { credits } }` to match the Polar meter filter.
+- `system-prompt.ts` — branding-aware (hosted "DarkCode AI" identity vs. generic engineer for BYOK), mode-specific tool lists incl. LSP, and a `## Prior conversation digest` block when a compaction summary exists.
+- `lib/env.ts` — zod-validated env. Model-relevant additions: `OLLAMA_BASE_URL` (default `http://localhost:11434/v1`), `OLLAMA_DEFAULT_MODEL`.
 
 ### `@darkcode/database` — Prisma
 
-Single `Session` model with `messages Json @default("[]")`. The chat route stores the entire `UIMessage[]` history in that column rather than normalizing per-message. Generated client lives at `packages/database/generated/prisma`; import via `@darkcode/database/client` (`db`) and `@darkcode/database` (types like `Prisma`).
+`Session` holds the full `UIMessage[]` in a Json column rather than normalizing per-message. Phase 3 added `workingMessages` (Json), `compactionSummary` (String?), `compactionAt` (DateTime?), `pinnedMessageIds` (String[]). Also: `AuditLog` (security events) and `PolarIngestOutbox` (failed-usage retry). There is **no** `DeviceToken` model (Phase 7 unimplemented). Generated client at `packages/database/generated/prisma`; import via `@darkcode/database/client` (`db`) and `@darkcode/database` (types).
 
 ### `@darkcode/cli` — OpenTUI + React terminal client (`packages/cli/src`)
 
-- Entry `index.tsx` boots an OpenTUI CLI renderer (`exitOnCtrlC: false` — Ctrl+C is handled by dialogs) and mounts a memory router with routes `/`, `/sessions/new`, `/sessions/:id`.
-- `lib/api-client.ts` calls the Hono server; it injects the auth token from `lib/auth.ts` and forwards BYOK API keys from `lib/api-keys.ts` as `x-darkcode-*` headers.
-- `lib/oauth.ts` runs the PKCE flow: opens the browser to Clerk, runs a tiny localhost callback server, exchanges code for tokens via the server's `/auth/callback`.
-- `lib/local-tools.ts` is the BUILD-mode execution layer. **All tool dispatch is client-side** — the server only declares the tool schema, the CLI executes the call against the user's actual filesystem inside `process.cwd()`. `resolveInsideCwd` rejects paths that escape the project dir; reads are capped at `MAX_FILE_SIZE`, search results at `MAX_RESULTS`/`MAX_MATCHES`, command output at `MAX_OUTPUT`, bash timeout defaults to 30s. PLAN-mode requests for write/edit/bash are rejected here as a defense-in-depth check.
-- `lib/api-keys.ts` stores BYOK keys at `~/.darkcode/api-keys.json` — never sent to the DB, only forwarded as headers.
-- UI is split into `screens/` (Home, NewSession, Session), `layouts/`, `components/` (dialogs, messages), `hooks/` (chat hook wraps `@ai-sdk/react`), `providers/` (Dialog, Keyboard, Prompt, Theme, Toast).
+- Entry `index.tsx` boots an OpenTUI renderer (`exitOnCtrlC: false` — Ctrl+C is handled by dialogs) with a memory router (`/`, `/sessions/new`, `/sessions/:id`). No `--help` flag (Phase 8).
+- `lib/local-tools.ts` — client-side dispatch for all tools. `resolveInsideCwd` jails paths; reads/search/output are capped; bash runs with a **scrubbed env** (`scrubbedBashEnv` strips API-key/token/secret vars). `writeFile`/`editFile`/`bash` route through `checkPermission(...)` first. After a successful BUILD-mode write, it runs the **post-edit diagnostics loop** (`postEditDiagnostics` → LSP pool) and attaches `diagnostics` to the tool result. Dispatches the `lsp*` tools to the pool. PLAN mode rejects write/edit/bash (defense-in-depth).
+- `lib/permissions/` — the permission engine (Phase 2). `engine.ts` `checkPermission(op)` classifies `{kind: "bash" | "fs" | "mcp"}` ops (deny → allow → ask → prompt), persists "allow always" rules, writes the audit log, and supports session **postures** (`normal` | `auto-edit` | `yolo`) via `setPermissionPosture`. `policy.ts` layers `defaults < ~/.darkcode/permissions.json < .darkcode/permissions.json`. `bash-classifier.ts` is shell-aware (splits pipelines, recurses into `$()`/backticks, default-deny on parse failure). `path-guards.ts` globs project-relative write paths. `mcp-classifier.ts` matches `mcp__server__tool` patterns. `audit.ts` appends JSONL to `~/.darkcode/audit.jsonl` (0600).
+- `lib/lsp/` — CLI-side LSP pool (Phase 4). `pool.ts` keeps one warm `LspClient` per language, lazy-launched. `client.ts` speaks LSP over a child process via `vscode-jsonrpc`. `server-registry.ts` maps extensions → server commands (typescript-language-server, pyright, rust-analyzer, gopls). Used by `local-tools.ts` for the `lsp*` tools and the post-edit diagnostics loop. **No `lsp.symbols` tool** (planned, not built).
+- `lib/mcp/` — CLI-side MCP host, **M1 only** (Phase 6). `config.ts` layers global+project `.darkcode/mcp.json` (**stdio transport only**). `host.ts` lazily connects, dedupes in-flight connects, lists tools, and dispatches `tools/call`. `discoverAllMcpTools()` runs at session start; the catalog is bundled into each chat request. Wire naming is `mcp__<server>__<tool>`. **Not built:** HTTP transport, health/restart/idle lifecycle, `/mcp add|remove|logs`, stderr capture.
+- `hooks/use-chat.ts` — wraps `@ai-sdk/react`. Discovers MCP tools, bundles them into the request, and in `onToolCall` routes `mcp__*` calls through `checkPermission({kind:"mcp"})` + the MCP host, everything else through `executeLocalTool` (which does its own permission checks).
+- `lib/api-keys.ts` — BYOK keys at `~/.darkcode/api-keys.json` (0600), forwarded only as `x-darkcode-*` headers. Ollama is keyless.
+- UI: `screens/` (Home, NewSession, Session), `components/dialogs/` (incl. `keys`, `models`, `sessions`, `mcp`, `permissions`, `audit`), `components/messages/` (incl. `compaction-divider`), `components/status-bar.tsx` (shows posture + `ctx N%` gauge, amber@75/red@90), `components/command-menu/` (slash commands), `providers/` (Dialog, Keyboard, Prompt-config (mode/model/posture/contextUsage), Theme, Toast).
+
+### Slash commands (`components/command-menu/commands.tsx`)
+
+`/new`, `/agents` (mode switch), `/models`, `/keys`, `/sessions`, `/theme`, `/login`, `/logout`, `/upgrade`, `/usage`, `/compact`, `/mcp` (viewer), `/permissions` (viewer), `/audit` (viewer), `/yolo`, `/auto-edit`, `/safe`, `/exit`.
 
 ### Tool calling flow (end to end)
 
-1. CLI sends user message + `{ mode, model }` to `POST /chat`.
-2. Server gates credits → `streamText` with tools from `getToolContracts(mode)`.
-3. Model emits a tool call as a stream part; AI SDK surfaces it to the CLI via `useChat`.
-4. CLI's chat hook detects the tool call, runs `executeLocalTool(name, input, mode)` in `local-tools.ts`, posts the result back as a tool-output message.
-5. Server resumes the stream with the tool output; on finish, persists `event.messages` and ingests Polar usage (hosted models only).
+1. CLI sends user message + `{ mode, model, mcpTools? }` to `POST /chat`.
+2. Server gates credits (with fallback), maybe compacts, merges MCP + built-in tools → `streamText`.
+3. Model emits a tool call; AI SDK surfaces it via `useChat.onToolCall`.
+4. CLI runs `executeLocalTool` (built-in, self-gated) or the MCP host (gated in the hook), posts the result back. BUILD writes attach LSP diagnostics.
+5. Server resumes the stream; on finish persists raw + working messages and ingests Polar usage (metered models only).
 
-### Modes
+### Modes & postures
 
-- `PLAN` — read-only tools only, intended for exploration.
-- `BUILD` — full tools incl. shell. The mode is carried in the request and re-stamped onto each message's metadata; switching mode mid-session is allowed and just changes which tools the next assistant turn can call.
+- `PLAN` — read-only tools (incl. LSP) only. `BUILD` — full tools incl. shell. Mode is carried in the request and re-stamped onto message metadata; switching mid-session is fine.
+- Permission **posture** (orthogonal to mode): `normal` prompts on unmatched side effects; `auto-edit` auto-allows fs writes **except `denyWrite` paths** (`.env`, `*.pem`, `**/.ssh/**`, …), with bash/MCP still gated; `yolo` auto-allows everything (logged loudly).
 
 ### Models & billing
 
-- "DarkCode AI" is the user-facing label for the hosted model backed by `MOONSHOT_API_KEY`. End users never see the upstream provider name.
-- BYOK Anthropic/OpenAI models are NOT metered (`isMetered: false`) — `ingestAiUsage` is skipped.
-- The Polar meter is keyed off the event `name` and the `credits` metadata field — do not rename either without updating the meter filter in the Polar dashboard.
+- "DarkCode AI" is the user-facing label for the hosted Moonshot/Kimi model. Never reveal the upstream provider name (enforced in `system-prompt.ts`).
+- **Only the hosted `darkcode` model is metered** (`isMetered: true`). All BYOK models — Anthropic, OpenAI, DeepSeek, **Google/Gemini** — and **Ollama** (local) are `isMetered: false`; usage ingest is skipped. Credit-depleted fallback to a BYOK model is also unmetered.
+- The Polar meter is keyed off the event `name` + `credits` metadata — don't rename either without updating the Polar dashboard filter.
+
+## Feature status (what to build on, what's missing)
+
+Cross-reference `darkcode-cli-implementation-plan.md` §10. The plan's own status table is stale — this reflects the actual tree:
+
+| Phase | State |
+|---|---|
+| P0 Foundations, P2 Permissions, P3 Compaction/sessions | ✅ shipped |
+| P1 Multi-model (Anthropic/OpenAI/DeepSeek/**Gemini**/**Ollama**) | ✅ shipped |
+| P4 LSP | ✅ working **cross-platform incl. Windows**; still missing `lsp.symbols` (planned enhancement) |
+| P6 MCP | ⚠️ **M1 only** (stdio); M2 (HTTP, lifecycle, `/mcp add\|remove\|logs`) **not built** |
+| P5 Kiro spec engine | ❌ not implemented (no `cli/lib/specs/`, no `/spec` commands) |
+| P7 Remote attach | ❌ not implemented (no `DeviceToken`, no `/attach`·`/pair`) |
+| P8 Hardening | ❌ not implemented (no tests, no `--help`, README stale, empty `scripts/`) |
+
+The unbuilt phases still have their build-agent briefs in `.claude/agents/darkcode-p{5,6,7,8}.md` (and `p1`, `p4`).
+
+## Known issues / gotchas
+
+- **`polar.ts` has 2 known TS errors** from Polar-SDK drift — out of scope, leave them. They're the only expected `tsc` errors.
+- **Compaction under-compacts rather than splitting a turn.** `lib/compaction.ts` snaps the retained-window cutoff back to a `user`-message boundary, so a window that would otherwise begin mid-turn just keeps a few extra messages. A single oversized turn therefore may not shrink — `chat.ts` still returns the structured 400 overflow refusal in that case. (It doesn't stub dropped tool results per the plan §7.1 design, but because the window now only ever starts on a user turn, `validateUIMessages`/`convertToModelMessages` no longer reject the working set.)
+- **`lsp.symbols` is still not built** (workspace/document symbol search) — see Feature status. The other LSP tools (`lspDefinition`/`lspReferences`/`lspHover`/`lspDiagnostics`) and the post-edit diagnostics loop work cross-platform, including Windows.
+
+_Recently fixed (were listed here): Windows LSP binary resolution (`lib/lsp/client.ts` now uses a PATHEXT-aware `resolveBinaryPath` instead of `spawn("which")` — verified spawning `typescript-language-server` and returning diagnostics on Windows); the LSP pool no longer installs Ctrl+C-hijacking `SIGINT`/`SIGTERM` handlers (cleanup is synchronous on `exit` via `LspClient.killSync()`); `auto-edit` posture now enforces the fs `denyWrite` list before auto-allowing; and the default bash policy no longer auto-allows `cat`/`head`/`tail **` (they route to a prompt)._
 
 ## TypeScript
 
-Strict mode, bundler resolution, `verbatimModuleSyntax`, `noUncheckedIndexedAccess`. Tests/lint aren't configured — when you touch types, rely on `tsc`/editor diagnostics.
+Strict mode, bundler resolution, `verbatimModuleSyntax`, `noUncheckedIndexedAccess`. No `as any`; the model registry is `as const satisfies` — narrow new entries cleanly rather than widening the union. Typecheck with the per-package `tsc --noEmit` invocations above.

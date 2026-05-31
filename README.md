@@ -9,58 +9,20 @@
 
 <p>Plan, chat, and build inside your local project with a Bun-powered CLI, Hono API, Prisma ORM, Clerk auth, and AI SDK streaming.</p>
 
-<br />
-
-<p>
-  <a href="https://cwa.run/bun?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=badge_bun"><img src="https://img.shields.io/badge/Bun-000000?style=for-the-badge&logo=bun&logoColor=white" alt="Bun" /></a>&nbsp;
-  <a href="https://cwa.run/opentui?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=badge_opentui"><img src="https://img.shields.io/badge/OpenTUI-111111?style=for-the-badge" alt="OpenTUI" /></a>&nbsp;
-  <a href="https://cwa.run/react?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=badge_react"><img src="https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB" alt="React" /></a>&nbsp;
-  <a href="https://cwa.run/hono?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=badge_hono"><img src="https://img.shields.io/badge/Hono-E36002?style=for-the-badge&logo=hono&logoColor=white" alt="Hono" /></a>&nbsp;
-  <a href="https://cwa.run/neon?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=badge_neon"><img src="https://img.shields.io/badge/Neon-00E599?style=for-the-badge&logo=neon&logoColor=black" alt="Neon" /></a>&nbsp;
-  <a href="https://cwa.run/clerk?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=badge_clerk"><img src="https://img.shields.io/badge/Clerk-6C47FF?style=for-the-badge&logo=clerk&logoColor=white" alt="Clerk" /></a>&nbsp;
-  <a href="https://cwa.run/polar?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=badge_polar"><img src="https://img.shields.io/badge/Polar-000000?style=for-the-badge&logo=polar&logoColor=white" alt="Polar" /></a>&nbsp;
-  <a href="https://cwa.run/coderabbit?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=badge_coderabbit"><img src="https://img.shields.io/badge/CodeRabbit-FF6C37?style=for-the-badge&logo=rabbitmq&logoColor=white" alt="CodeRabbit" /></a>&nbsp;
-  <a href="https://cwa.run/sentry?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=badge_sentry"><img src="https://img.shields.io/badge/Sentry-362D59?style=for-the-badge&logo=sentry&logoColor=white" alt="Sentry" /></a>&nbsp;
-  <a href="https://cwa.run/railway?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=badge_railway"><img src="https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway&logoColor=white" alt="Railway" /></a>
-</p>
-
 </div>
 
 <br />
 
-## Tutorial
-
-Each chapter has a matching branch so you can check out the code at any point in the tutorial:
-
-| Branch | Chapter |
-|--------|---------|
-| `main` | Final project |
-| `01-project-setup-component-architecture` | Project setup and component architecture |
-| `02-ui-infrastructure` | Terminal UI infrastructure |
-| `03-routing-screen-layout` | Routing and screen layout |
-| `04-server-shared-database` | Server, shared package, and database |
-| `05-ai-chat-streamiing` | AI chat streaming |
-| `06-session-management-config` | Session management and configuration |
-| `07-tool-calling` | Tool calling |
-| `08-user-experience` | User experience polish |
-| `09-billing` | Billing and credit metering |
-| `10-client-side-tool-execution` | Client-side tool execution |
-| `11-the-end` | Final tutorial state |
-
-```bash
-git checkout 07-tool-calling  # example: jump to tool calling
-```
-
 ## Features
 
-- **Terminal AI Chat** - Run an AI coding assistant directly in your terminal with an OpenTUI and React interface
-- **Plan and Build Modes** - Use read-only planning tools or enable write, edit, and shell execution tools for implementation
-- **Streaming Responses** - Stream model output through the AI SDK with persisted session history
-- **Local Project Tools** - Read files, list directories, glob, grep, write files, edit files, and run shell commands inside the current project
-- **Multi-Model Support** - Ship with **DarkCode AI** as the default hosted model, plus bring-your-own-key support for Anthropic Claude and OpenAI GPT models
-- **Persistent Sessions** - Store authenticated user sessions and messages in Postgres via Prisma
-- **Clerk OAuth** - Authenticate the CLI through a browser-based Clerk OAuth flow
-- **Usage Billing** - Meter AI usage as credits through Polar before allowing session and chat actions
+- **Terminal AI Chat** — Run an AI coding assistant directly in your terminal with an OpenTUI and React interface
+- **Plan and Build Modes** — Use read-only planning tools or enable write, edit, and shell execution tools for implementation
+- **Streaming Responses** — Stream model output through the AI SDK with persisted session history
+- **Local Project Tools** — Read files, list directories, glob, grep, write files, edit files, and run shell commands inside the current project
+- **Multi-Model Support** — Ship with **DarkCode AI** as the default hosted model, plus bring-your-own-key support for Anthropic Claude and OpenAI GPT models
+- **Persistent Sessions** — Store authenticated user sessions and messages in Postgres via Prisma
+- **Clerk OAuth** — Authenticate the CLI through a browser-based Clerk OAuth flow
+- **Usage Billing** — Meter AI usage as credits through Polar before allowing session and chat actions
 
 ## Models
 
@@ -75,12 +37,12 @@ Switch between models at any time with `/models`. If a model needs a key the CLI
 
 ### Prerequisites
 
-- [Bun](https://cwa.run/bun?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=prerequisites_bun) installed
-- PostgreSQL database, such as [Neon](https://cwa.run/neon?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=prerequisites_neon)
-- [Clerk](https://cwa.run/clerk?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=prerequisites_clerk) application configured for OAuth
+- [Bun](https://bun.sh) installed
+- PostgreSQL database (e.g. [Neon](https://neon.tech))
+- [Clerk](https://clerk.com) application configured for OAuth
 - A [Moonshot AI](https://platform.moonshot.ai) API key for the hosted **DarkCode AI** model
 - Optional: Anthropic or OpenAI API keys, supplied by end users via `/keys` (BYOK)
-- [Polar](https://cwa.run/polar?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=prerequisites_polar) account and credits meter
+- [Polar](https://polar.sh) account and credits meter
 
 ### 1. Clone and install
 
@@ -122,7 +84,7 @@ POLAR_CREDITS_METER_ID=
 
 DarkCode authenticates the CLI through a browser-based Clerk OAuth flow. The CLI opens Clerk authorization in the browser, Clerk redirects to the server at `/auth/callback`, and the server forwards the authorization code back to the local CLI callback server.
 
-In your [Clerk](https://cwa.run/clerk?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=setup_clerk) dashboard:
+In your Clerk dashboard:
 
 1. Go to **Configure > Developers > OAuth applications**.
 2. Click **Add OAuth application**.
@@ -149,7 +111,7 @@ Copy the generated application credentials into `.env`:
 
 DarkCode uses Polar credits to gate new work and bill completed AI usage. The server checks the user's active meter balance before creating sessions or sending chat requests, then ingests usage events after AI responses finish.
 
-In your [Polar](https://cwa.run/polar?utm_source=github&utm_medium=readme&utm_campaign=darkcode&utm_content=setup_polar) dashboard, use sandbox mode for local development and create a meter with these exact settings:
+In your Polar dashboard, use sandbox mode for local development and create a meter with these exact settings:
 
 | Setting | Value |
 |---------|-------|

@@ -6,6 +6,7 @@ import { bodyLimit } from "hono/body-limit";
 import { env, isProduction } from "./lib/env";
 import { initSentry, captureException, Sentry } from "./lib/sentry";
 import { logger } from "./lib/logger";
+import { safeErrorMessage } from "./lib/safe-error";
 import { startPolarOutboxSweeper, stopPolarOutboxSweeper } from "./lib/polar-outbox";
 import { closeRedis } from "./lib/redis";
 import { db } from "@darkcode/database/client";
@@ -59,9 +60,11 @@ app.onError((error, c) => {
   if (error && typeof error === "object" && "name" in error && error.name === "AI_APICallError") {
     log.error({ err: error }, "upstream_model_error");
     captureException(error, { userId, requestId, tags: { kind: "upstream_model" } });
-    const message = isProduction
-      ? "Upstream model request failed"
-      : (error as { message?: string }).message ?? "Upstream model request failed";
+    // Never return the raw AI_APICallError.message — for some providers it
+    // contains the full request body (system prompt + messages + tool
+    // results), which would leak the conversation back to the user as a
+    // red error in the TUI.
+    const message = safeErrorMessage(error, "Upstream model request failed");
     return c.json({ error: message, requestId }, 502);
   }
 

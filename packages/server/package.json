@@ -8,10 +8,15 @@
   "scripts": {
     "dev": "bun run --hot src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test",
     "postinstall": "bun run --cwd ../database db:generate"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.68",
+    "@ai-sdk/google": "^3.0.80",
     "@ai-sdk/openai": "^3.0.52",
     "@clerk/backend": "^3.2.8",
     "@darkcode/database": "workspace:*",

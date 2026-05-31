@@ -49,6 +49,12 @@ const schema = z.object({
 
   // Rate-limit / cache store. Leave empty to use the in-memory fallback.
   REDIS_URL: Optional,
+
+  // Ollama local inference (optional). Defaults to the standard local endpoint.
+  OLLAMA_BASE_URL: z.string().url().default("http://localhost:11434/v1"),
+  // Override the Ollama model id (e.g. "llama3.2", "codestral"). Defaults to
+  // the upstreamModelId set in the registry entry.
+  OLLAMA_DEFAULT_MODEL: Optional,
 });
 
 export type Env = z.infer<typeof schema>;

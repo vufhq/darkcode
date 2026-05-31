@@ -18,7 +18,19 @@ model Session {
   title     String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  // Raw transcript — append-only, never edited by compaction. Always reflects
+  // the full conversation history for audit and replay.
   messages  Json     @default("[]")
+  // Working context — what the server actually sends to streamText. Diverges
+  // from `messages` once compaction has run. On first compaction this is
+  // backfilled from `messages`; from then on both arrays receive new turns.
+  workingMessages   Json     @default("[]")
+  // Latest compaction digest, injected into the system prompt as a "## Prior
+  // conversation digest" block. Null until first compaction.
+  compactionSummary String?
+  compactionAt      DateTime?
+  // Message ids that survive the dropper. Empty until pin UI ships.
+  pinnedMessageIds  String[] @default([])
   @@index([userId])
 }
 

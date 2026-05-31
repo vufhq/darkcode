@@ -1,5 +1,6 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import {
   findSupportedChatModel,
   type ByokProvider,
@@ -14,6 +15,8 @@ type AnthropicModelId = Extract<SupportedChatModel, { provider: "anthropic" }>["
 type OpenAIModelId = Extract<SupportedChatModel, { provider: "openai" }>["id"];
 type DarkcodeModelId = Extract<SupportedChatModel, { provider: "darkcode" }>["id"];
 type OpenAICompatibleModel = Extract<SupportedChatModel, { provider: "openai-compatible" }>;
+type GoogleModel = Extract<SupportedChatModel, { provider: "google" }>;
+type OllamaModel = Extract<SupportedChatModel, { provider: "ollama" }>;
 
 export type ResolvedModel = {
   model: LanguageModel;
@@ -107,6 +110,35 @@ function resolveOpenAICompatibleModel(
   };
 }
 
+function resolveGoogleModel(model: GoogleModel, apiKey: string): ResolvedModel {
+  const google = createGoogleGenerativeAI({ apiKey });
+  return {
+    model: google(model.upstreamModelId),
+    provider: "google",
+    modelId: model.id,
+    isMetered: false,
+  };
+}
+
+function resolveOllamaModel(model: OllamaModel): ResolvedModel {
+  // Ollama exposes an OpenAI-compatible endpoint. No API key is needed for
+  // local inference. The base URL can be overridden via OLLAMA_BASE_URL
+  // (defaults to http://localhost:11434/v1 per the env schema).
+  const baseURL = env.OLLAMA_BASE_URL;
+  // Allow the operator to point at a different pulled model at runtime.
+  const upstreamModelId = env.OLLAMA_DEFAULT_MODEL ?? model.upstreamModelId;
+  const ollama = createOpenAI({
+    apiKey: "ollama", // Ollama ignores the key; the SDK requires a non-empty string.
+    baseURL,
+  });
+  return {
+    model: ollama.chat(upstreamModelId),
+    provider: "ollama",
+    modelId: model.id,
+    isMetered: false,
+  };
+}
+
 function resolveDarkcodeModel(modelId: DarkcodeModelId): ResolvedModel {
   const apiKey = env.MOONSHOT_API_KEY;
 
@@ -182,6 +214,16 @@ function resolveSupportedChatModel(
       }
       return resolveOpenAICompatibleModel(model, apiKey);
     }
+    case "google": {
+      const apiKey = apiKeys.google;
+      if (!apiKey) {
+        throw new ApiKeyRequiredError("google");
+      }
+      return resolveGoogleModel(model, apiKey);
+    }
+    case "ollama":
+      // Ollama is local-only and requires no key.
+      return resolveOllamaModel(model);
     default:
       return assertUnsupportedProvider(provider);
   }

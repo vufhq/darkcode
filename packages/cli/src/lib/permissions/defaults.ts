@@ -24,9 +24,10 @@ export const DEFAULT_POLICY: Policy = {
       "ls",
       "ls **",
       "pwd",
-      "cat **",
-      "head **",
-      "tail **",
+      // NOTE: cat/head/tail are intentionally NOT auto-allowed. bash has no
+      // path jail, so `cat ~/.ssh/id_rsa` or `tail ../../secret` would exfil
+      // files from outside the project. These now route to a prompt; choosing
+      // "allow always" saves the exact (project-local) command the user OKs.
       "wc **",
       "echo **",
       "which **",
@@ -78,6 +79,14 @@ export const DEFAULT_POLICY: Policy = {
       "curl **",
       "wget **",
     ],
+  },
+  mcp: {
+    // Default-ask for every MCP tool. The first call surfaces a permission
+    // prompt; "allow always" writes the exact tool name to the project policy
+    // under `mcp.allow`.
+    allow: [],
+    deny: [],
+    ask: ["mcp__**"],
   },
   fs: {
     allowWrite: [

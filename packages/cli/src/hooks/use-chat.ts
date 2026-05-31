@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useChat as useAiChat } from "@ai-sdk/react";
 import {
   DefaultChatTransport,
@@ -19,12 +19,31 @@ import { getAuth } from "../lib/auth";
 import { getAllApiKeys } from "../lib/api-keys";
 import { executeLocalTool } from "../lib/local-tools";
 import { captureCliException } from "../lib/sentry";
+import {
+  MCP_TOOL_NAME_PREFIX,
+  callMcpTool,
+  discoverAllMcpTools,
+  type McpToolDescriptor,
+} from "../lib/mcp";
+import { checkPermission, PermissionDeniedError } from "../lib/permissions/engine";
 
 export type ChatMessageMetadata = {
   mode?: ModeType;
   model?: SupportedChatModelId | string;
   durationMs?: number;
   usage?: LanguageModelUsage;
+  // Present on the assistant message returned from a turn that ran
+  // compaction. CLI renders a `CompactionDivider` ahead of the message.
+  compaction?: {
+    droppedCount: number;
+    summary: string;
+  };
+  // Snapshot of token utilization for the just-completed request, used to
+  // drive the per-turn context-usage indicator in the BotMessage footer.
+  contextUsage?: {
+    estimatedTokens: number;
+    contextWindow: number;
+  };
 };
 
 type ChatTools = {
@@ -37,6 +56,32 @@ type ChatTools = {
 export type Message = UIMessage<ChatMessageMetadata, never, ChatTools>;
 
 export function useChat(sessionId: string, initialMessages: Message[]) {
+  // MCP tools advertised in each chat request. Discovered once per CLI
+  // session — M2 will subscribe to `notifications/tools/list_changed` for
+  // hot updates. Held in a ref so the transport's `prepareSendMessagesRequest`
+  // (which is created once via useMemo) can read the latest value without
+  // re-creating the transport on every discovery.
+  const mcpToolsRef = useRef<McpToolDescriptor[]>([]);
+  const [, setMcpToolsTick] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    void discoverAllMcpTools()
+      .then((tools) => {
+        if (cancelled) return;
+        mcpToolsRef.current = tools;
+        // Bump a counter so React knows discovery resolved — useful for any
+        // future UI that wants to render the catalog.
+        setMcpToolsTick((n) => n + 1);
+      })
+      .catch((error) => {
+        captureCliException(error, { sessionId, kind: "mcp_discovery" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
   const transport = useMemo(() => {
     return new DefaultChatTransport<Message>({
       api: apiClient.chat.$url().toString(),
@@ -70,12 +115,23 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
             ? [previousMessage, message]
             : [message];
 
+        const mcpTools = mcpToolsRef.current;
+
         return {
           body: {
             id: sessionId,
             messages: requestMessages,
             mode: message.metadata?.mode ?? metadata?.mode,
             model: message.metadata?.model ?? metadata?.model,
+            ...(mcpTools.length > 0
+              ? {
+                  mcpTools: mcpTools.map((t) => ({
+                    name: t.name,
+                    description: t.description,
+                    inputSchema: t.inputSchema,
+                  })),
+                }
+              : {}),
           },
         }
       }
@@ -88,8 +144,23 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
     transport,
     onToolCall({ toolCall }) {
       const mode = chat.messages.at(-1)?.metadata?.mode ?? "BUILD";
+      const isMcp = toolCall.toolName.startsWith(MCP_TOOL_NAME_PREFIX);
 
-      void executeLocalTool(toolCall.toolName, toolCall.input, mode)
+      // Built-in tools run their own permission check inside `executeLocalTool`
+      // (bash / writeFile / editFile). MCP tools aren't wired through that
+      // dispatcher, so we gate them here before calling the host.
+      const dispatch = isMcp
+        ? (async () => {
+            await checkPermission({
+              kind: "mcp",
+              toolName: toolCall.toolName,
+              args: toolCall.input,
+            });
+            return callMcpTool(toolCall.toolName, toolCall.input);
+          })()
+        : executeLocalTool(toolCall.toolName, toolCall.input, mode);
+
+      void dispatch
         .then((output) =>
           chat.addToolOutput({
             tool: toolCall.toolName as keyof ChatTools,
@@ -98,11 +169,15 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
           }),
         )
         .catch((error) => {
-          captureCliException(error, {
-            toolName: toolCall.toolName,
-            toolCallId: toolCall.toolCallId,
-            sessionId,
-          });
+          // PermissionDeniedError is expected user signal, not a CLI bug —
+          // surface it back to the model as a tool error without telemetry.
+          if (!(error instanceof PermissionDeniedError)) {
+            captureCliException(error, {
+              toolName: toolCall.toolName,
+              toolCallId: toolCall.toolCallId,
+              sessionId,
+            });
+          }
           chat.addToolOutput({
             tool: toolCall.toolName as keyof ChatTools,
             toolCallId: toolCall.toolCallId,

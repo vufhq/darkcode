@@ -6,6 +6,7 @@ export type AuditAction =
   | "auth.logout"
   | "auth.token_refresh"
   | "session.create"
+  | "session.compact"
   | "billing.checkout"
   | "billing.portal"
   | "credits.depleted";

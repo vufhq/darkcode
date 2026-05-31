@@ -13,8 +13,17 @@ type Props = {
   model: string;
   mode: ModeType;
   durationMs?: number;
+  contextUsage?: { estimatedTokens: number; contextWindow: number };
   streaming?: boolean;
 };
+
+function formatContextPercent(usage: {
+  estimatedTokens: number;
+  contextWindow: number;
+}): string {
+  const pct = (usage.estimatedTokens / usage.contextWindow) * 100;
+  return `${pct.toFixed(0)}%`;
+}
 
 function formatToolName(name: string): string {
   return name
@@ -57,14 +66,28 @@ function groupConsecutiveParts(parts: ClientMessagePart[]): PartGroup[] {
   return groups;
 };
 
-export function BotMessage({ 
+export function BotMessage({
   parts,
   model,
   mode,
   durationMs,
+  contextUsage,
   streaming = false,
 }: Props) {
   const { colors } = useTheme();
+  const usagePercent = contextUsage
+    ? contextUsage.estimatedTokens / contextUsage.contextWindow
+    : null;
+  // Theme doesn't currently expose warning/error colors; literal ANSI names
+  // render correctly in OpenTUI and are stable across themes.
+  const usageColor =
+    usagePercent == null
+      ? undefined
+      : usagePercent >= 0.9
+        ? "red"
+        : usagePercent >= 0.75
+          ? "yellow"
+          : undefined;
   return (
     <box width="100%" alignItems="center">
       {groupConsecutiveParts(parts).map((group, i) => (
@@ -149,6 +172,16 @@ export function BotMessage({
                 </text>
                 <text attributes={TextAttributes.DIM}>
                   {prettyMs(durationMs)}
+                </text>
+              </>
+            )}
+            {contextUsage && (
+              <>
+                <text attributes={TextAttributes.DIM} fg={colors.dimSeparator}>
+                  ›
+                </text>
+                <text attributes={TextAttributes.DIM} fg={usageColor}>
+                  ctx {formatContextPercent(contextUsage)}
                 </text>
               </>
             )}

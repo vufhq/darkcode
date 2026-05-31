@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { DecisionOutcome } from "./types";
@@ -6,7 +6,7 @@ import type { DecisionOutcome } from "./types";
 const CONFIG_DIR = join(homedir(), ".darkcode");
 const AUDIT_FILE = join(CONFIG_DIR, "audit.jsonl");
 
-type AuditEntry = {
+export type AuditEntry = {
   ts: string;
   tool: string;
   summary: string;
@@ -40,5 +40,27 @@ export function writeAudit(
     appendFileSync(AUDIT_FILE, JSON.stringify(entry) + "\n", { mode: 0o600 });
   } catch {
     // Audit failures must never break tool execution. Swallow and continue.
+  }
+}
+
+// Read the most recent entries from the audit log. Returns an empty array if
+// the file doesn't exist yet. Loads the whole file and slices — the log is
+// JSONL and stays small in practice; rotation can come later.
+export function readRecentAudit(limit = 50): AuditEntry[] {
+  try {
+    const raw = readFileSync(AUDIT_FILE, "utf-8");
+    const lines = raw.split("\n").filter((l) => l.length > 0);
+    const tail = lines.slice(-limit);
+    const entries: AuditEntry[] = [];
+    for (const line of tail) {
+      try {
+        entries.push(JSON.parse(line) as AuditEntry);
+      } catch {
+        // Skip malformed lines rather than failing the viewer.
+      }
+    }
+    return entries.reverse();
+  } catch {
+    return [];
   }
 }

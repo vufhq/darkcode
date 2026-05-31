@@ -9,7 +9,8 @@ import { getErrorMessage } from "../../lib/http-errors";
 import { DialogSearchList } from "../dialog-search-list";
 import type { InferResponseType } from "hono/client";
 
-type Session = InferResponseType<(typeof apiClient.sessions)["$get"], 200>[number];
+type SessionsResponse = InferResponseType<(typeof apiClient.sessions)["$get"], 200>;
+type Session = SessionsResponse["sessions"][number];
 
 export const SessionsDialogContent = () => {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -31,7 +32,7 @@ export const SessionsDialogContent = () => {
         const data = await res.json();
 
         if (!ignore) {
-          setSessions(data);
+          setSessions(data.sessions);
           setLoading(false);
         }
       } catch (error) {

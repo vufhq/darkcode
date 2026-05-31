@@ -17,9 +17,20 @@ export type FsRules = {
   denyWrite: string[];
 };
 
+// MCP rules match against the wire-format tool name (`mcp__<server>__<tool>`).
+// `*` matches a single segment between `__` separators; `**` matches all
+// remaining segments. So `mcp__github__*` allows every github tool, and
+// `mcp__**` allows everything from every MCP server.
+export type McpRules = {
+  allow: string[];
+  deny: string[];
+  ask: string[];
+};
+
 export type Policy = {
   bash: BashRules;
   fs: FsRules;
+  mcp: McpRules;
 };
 
 export type Decision = "allow" | "deny" | "ask";

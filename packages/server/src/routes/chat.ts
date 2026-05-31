@@ -3,10 +3,14 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import {
   convertToModelMessages,
+  jsonSchema,
   streamText,
+  tool,
   validateUIMessages,
   type InferUITools,
   type LanguageModelUsage,
+  type Tool,
+  type ToolSet,
   type UIMessage,
 } from "ai";
 import { db } from "@darkcode/database/client";
@@ -15,12 +19,17 @@ import {
   BYOK_PROVIDERS,
   BYOK_PROVIDER_HEADER,
   findSupportedChatModel,
+  getModelContextWindow,
+  getModelFallbackId,
   getToolContracts,
   modeSchema,
   type ModeType,
   type ToolContracts,
 } from "@darkcode/shared";
 import { buildSystemPrompt } from "../system-prompt";
+import { compactWorkingContext } from "../lib/compaction";
+import { projectNextRequestTokens } from "../lib/token-estimate";
+import { safeErrorMessage } from "../lib/safe-error";
 import type { AuthenticatedEnv } from "../middleware/require-auth";
 import { getAvailableCreditsBalance } from "../lib/polar";
 import { ingestAiUsageWithOutbox } from "../lib/polar-outbox";
@@ -40,21 +49,58 @@ type ChatMessageMetadata = {
   model?: string;
   durationMs?: number;
   usage?: LanguageModelUsage;
+  // Populated on the assistant message returned from a turn that triggered
+  // compaction. CLI uses this to render an inline `CompactionDivider` and
+  // refresh the status bar's window-utilization indicator.
+  compaction?: {
+    droppedCount: number;
+    summary: string;
+  };
+  // Snapshot of token utilization for the just-completed request, so the CLI
+  // can drive the status-bar gauge without re-estimating client-side.
+  contextUsage?: {
+    estimatedTokens: number;
+    contextWindow: number;
+  };
 };
 
 type DarkcodeUIMessage = UIMessage<ChatMessageMetadata, never, InferUITools<ToolContracts>>;
 
+// Wire shape for an MCP tool advertised by the CLI host. We don't validate
+// the JSON Schema body — only the LLM provider sees it, and a malformed
+// schema will surface as a model error rather than a security issue.
+const mcpToolSchema = z.object({
+  // `mcp__<server>__<tool>` — bounded so a single tool name can't bloat the
+  // catalog we hand to the model every turn.
+  name: z.string().min(1).max(128),
+  // Surfaced verbatim to the model, so cap it: an unbounded description is a
+  // request-bloat and prompt-injection surface.
+  description: z.string().max(2_000).default(""),
+  inputSchema: z.unknown(),
+});
+
 const submitSchema = z.object({
-  id: z.string(),
+  // Session ids are CUIDs; bound the length so an oversized string fails fast
+  // before touching the DB. (IDOR is already blocked by the userId-scoped
+  // findUnique downstream.)
+  id: z.string().min(1).max(64),
+  // The CLI's transport sends at most 2 messages per turn (the new user turn,
+  // optionally paired with the assistant message carrying tool results), so a
+  // small cap is generous headroom while bounding the merge/persist work.
   messages: z
     .array(
       z.custom<DarkcodeUIMessage>((value) => {
         return value != null && typeof value === "object" && "id" in value && "parts" in value;
       }),
     )
-    .min(1),
+    .min(1)
+    .max(20),
   mode: modeSchema,
   model: z.string().refine(isSupportedChatModel, "Unsupported model"),
+  // MCP tools discovered CLI-side this turn. Optional: a session with no MCP
+  // servers configured omits the field entirely. Capped so a malicious or
+  // runaway config can't inject an unbounded tool catalog.
+  mcpTools: z.array(mcpToolSchema).max(64).optional(),
 });
 
 const submitValidator = zValidator("json", submitSchema, (result, c) => {
@@ -93,7 +139,7 @@ const app = new Hono<AuthenticatedEnv>()
       const userId = c.get("userId");
       const log = c.get("log");
       const requestId = c.get("requestId");
-      const { id, messages, mode, model } = c.req.valid("json");
+      const { id, messages, mode, model, mcpTools } = c.req.valid("json");
 
       // Idempotency: optional `Idempotency-Key` header. Two requests from the
       // same user with the same key within the TTL only get processed once.
@@ -109,10 +155,16 @@ const app = new Hono<AuthenticatedEnv>()
         }
       }
 
-      const modelDefinition = findSupportedChatModel(model);
+      let modelDefinition = findSupportedChatModel(model);
       if (!modelDefinition) {
         return c.json({ error: "Unsupported model" }, 400);
       }
+
+      // Effective model id we'll actually run with. May be swapped to the
+      // registered fallback if the primary model can't run this turn (e.g.
+      // credits depleted on the hosted model and the user has a BYOK key).
+      let effectiveModelId: string = model;
+      const apiKeys = readApiKeysFromHeaders(c.req.raw.headers);
 
       // Only meter against DarkCode credits when the user is using a model we host.
       // BYOK models bill against the user's own provider account, so we skip the gate.
@@ -120,11 +172,28 @@ const app = new Hono<AuthenticatedEnv>()
         try {
           const creditsBalance = await getAvailableCreditsBalance(userId);
           if (creditsBalance <= 0) {
-            void logAuditEvent({ userId, action: "credits.depleted", requestId });
-            return c.json(
-              { error: "No credits remaining. Run /upgrade to buy more credits." },
-              402,
-            );
+            // If the hosted model has a fallback and the user has the key
+            // for it, swap in the fallback instead of refusing the turn.
+            const fallbackId = getModelFallbackId(model);
+            const fallbackDef = fallbackId ? findSupportedChatModel(fallbackId) : null;
+            const fallbackKeyAvailable =
+              fallbackDef && fallbackDef.requiresApiKey
+                ? apiKeys[fallbackDef.byokProvider] != null
+                : fallbackDef != null;
+            if (fallbackDef && fallbackKeyAvailable) {
+              log.info(
+                { userId, requestId, from: model, to: fallbackDef.id },
+                "chat.credits_depleted_fallback",
+              );
+              modelDefinition = fallbackDef;
+              effectiveModelId = fallbackDef.id;
+            } else {
+              void logAuditEvent({ userId, action: "credits.depleted", requestId });
+              return c.json(
+                { error: "No credits remaining. Run /upgrade to buy more credits." },
+                402,
+              );
+            }
           }
         } catch (error) {
           log.error({ err: error }, "credits_balance_unavailable");
@@ -142,10 +211,32 @@ const app = new Hono<AuthenticatedEnv>()
       }
 
       const startTime = Date.now();
-      const tools = getToolContracts(mode);
+      // Merge MCP tools (CLI-side, discovered this turn) into the static
+      // contracts. MCP entries have no `execute` — dispatch is client-side via
+      // useChat's onToolCall, identical to the built-in tools. The merged set
+      // is what we hand to both streamText (for the LLM's tool catalog) and
+      // validateUIMessages (so the validator doesn't reject mcp__* parts).
+      const builtInTools = getToolContracts(mode);
+      const mcpDynamicTools: Record<string, Tool> = {};
+      if (mcpTools && mcpTools.length > 0) {
+        for (const t of mcpTools) {
+          mcpDynamicTools[t.name] = tool({
+            description: t.description,
+            inputSchema: jsonSchema(
+              (t.inputSchema as Parameters<typeof jsonSchema>[0]) ?? {
+                type: "object",
+                properties: {},
+              },
+            ),
+          });
+        }
+      }
+      // The static type of `tools` is the built-in ToolContracts; we widen to
+      // ToolSet for runtime use because the MCP set is discovered per-request.
+      const tools = { ...builtInTools, ...mcpDynamicTools } as unknown as ToolSet;
       let resolvedModel;
       try {
-        resolvedModel = resolveChatModel(model, readApiKeysFromHeaders(c.req.raw.headers));
+        resolvedModel = resolveChatModel(effectiveModelId, apiKeys);
       } catch (error) {
         if (error instanceof ApiKeyRequiredError) {
           return c.json(
@@ -158,28 +249,159 @@ const app = new Hono<AuthenticatedEnv>()
         }
         throw error;
       }
-      const previousMessages = Array.isArray(session.messages)
+      // Merge incoming messages into both the raw transcript and the working
+      // context separately. The raw transcript (`session.messages`) is
+      // append-only and never edited by compaction; the working context
+      // (`session.workingMessages`) is what we send to the model and gets
+      // pruned when the window fills. New sessions have empty `workingMessages`
+      // — backfill from `messages` so existing rows behave correctly without
+      // a data migration.
+      const rawPrevious = Array.isArray(session.messages)
         ? (session.messages as unknown as DarkcodeUIMessage[])
         : [];
-      const mergedMessages = [...previousMessages];
-      
-      for (const message of messages) {
-        const incomingMessage = {
-          ...message,
-          metadata: { ...message.metadata, mode, model },
-        } satisfies DarkcodeUIMessage;
+      const workingPreviousRaw = Array.isArray(session.workingMessages)
+        ? (session.workingMessages as unknown as DarkcodeUIMessage[])
+        : [];
+      const workingPrevious =
+        workingPreviousRaw.length > 0 ? workingPreviousRaw : rawPrevious;
 
-        const existingMessageIndex = mergedMessages.findIndex((m) => m.id === incomingMessage.id);
+      function mergeIncoming(base: DarkcodeUIMessage[]): DarkcodeUIMessage[] {
+        const merged = [...base];
+        for (const message of messages) {
+          const stamped = {
+            ...message,
+            metadata: { ...message.metadata, mode, model },
+          } satisfies DarkcodeUIMessage;
+          const idx = merged.findIndex((m) => m.id === stamped.id);
+          if (idx === -1) merged.push(stamped);
+          else merged[idx] = stamped;
+        }
+        return merged;
+      }
 
-        if (existingMessageIndex === -1) {
-          mergedMessages.push(incomingMessage);
-        } else {
-          mergedMessages[existingMessageIndex] = incomingMessage;
+      const rawMerged = mergeIncoming(rawPrevious);
+      let workingMerged = mergeIncoming(workingPrevious);
+
+      // Compaction trigger: project the next request's token count against the
+      // model's context window. Compact at >=75% so the model has headroom
+      // for its own response (the reserve is baked into the projection).
+      const contextWindow = getModelContextWindow(effectiveModelId);
+      const builtSystemPromptForProjection = buildSystemPrompt({
+        mode,
+        model: effectiveModelId,
+        compactionSummary: session.compactionSummary,
+      });
+      const projectedTokens = projectNextRequestTokens({
+        systemPrompt: builtSystemPromptForProjection,
+        workingMessages: workingMerged,
+        incomingMessages: [],
+      });
+
+      let compactionEvent: { droppedCount: number; summary: string } | null = null;
+      let compactionUsage: LanguageModelUsage | null = null;
+      let activeCompactionSummary: string | null = session.compactionSummary ?? null;
+
+      if (projectedTokens / contextWindow >= 0.75) {
+        log.info(
+          {
+            sessionId: id,
+            projectedTokens,
+            contextWindow,
+            messageCount: workingMerged.length,
+          },
+          "chat.compaction_triggered",
+        );
+
+        try {
+          const result = await compactWorkingContext({
+            rawWorkingMessages: workingMerged,
+            pinnedMessageIds: session.pinnedMessageIds ?? [],
+            previousSummary: activeCompactionSummary,
+            summarizerModel: resolvedModel.model,
+          });
+
+          if (result.droppedCount > 0) {
+            // Compactor preserves message identity; safe to narrow back to our
+            // typed metadata shape.
+            workingMerged = result.workingMessages as DarkcodeUIMessage[];
+            activeCompactionSummary = result.summary;
+            compactionEvent = {
+              droppedCount: result.droppedCount,
+              summary: result.summary,
+            };
+            // The summarizer call consumed real tokens. When the active model
+            // is hosted (metered), meter it — otherwise repeated compaction is
+            // unbilled API spend on our account.
+            compactionUsage = result.usage;
+          }
+        } catch (error) {
+          // Compaction failure should not block the user's turn. Log it,
+          // skip compaction, and let the upstream-window error (if any) surface
+          // naturally — the user can /compact manually as a workaround.
+          log.error({ err: error, sessionId: id }, "chat.compaction_failed");
+          captureException(error, {
+            userId,
+            requestId,
+            tags: { kind: "compaction" },
+            extra: { sessionId: id },
+          });
         }
       }
 
+      // Meter the summarizer call for hosted models. Billed here (not in the
+      // stream's onFinish) because the tokens were already spent regardless of
+      // whether this turn later overflows the window or ends with pending tool
+      // calls — both of which short-circuit the onFinish billing path. The
+      // ingest is fire-and-forget: it self-queues to the outbox on failure.
+      if (compactionUsage && resolvedModel.isMetered) {
+        try {
+          const { credits } = calculateCreditsForUsage({
+            provider: resolvedModel.provider,
+            model: resolvedModel.modelId,
+            usage: compactionUsage,
+          });
+          void ingestAiUsageWithOutbox({
+            externalCustomerId: userId,
+            eventId: `chat-compaction:${id}:${startTime}`,
+            credits,
+          });
+        } catch (error) {
+          log.error({ err: error, sessionId: id }, "chat.compaction_credit_calc_failed");
+          captureException(error, {
+            userId,
+            requestId,
+            tags: { kind: "polar_compaction_credit_calc" },
+            extra: { sessionId: id },
+          });
+        }
+      }
+
+      // Post-compaction overflow refusal: if a single incoming message still
+      // blows the window on its own, fail loudly instead of waiting for the
+      // upstream provider to 4xx.
+      const finalProjection = projectNextRequestTokens({
+        systemPrompt: buildSystemPrompt({
+          mode,
+          model: effectiveModelId,
+          compactionSummary: activeCompactionSummary,
+        }),
+        workingMessages: workingMerged,
+        incomingMessages: [],
+      });
+      if (finalProjection > contextWindow) {
+        return c.json(
+          {
+            error:
+              "This turn exceeds the model's context window even after compaction. Trim the latest message or switch to a model with a larger window.",
+            projectedTokens: finalProjection,
+            contextWindow,
+          },
+          400,
+        );
+      }
+
       const nextMessages = await validateUIMessages<DarkcodeUIMessage>({
-        messages: mergedMessages,
+        messages: workingMerged,
         tools,
       });
       const modelMessages = await convertToModelMessages(nextMessages, { tools });
@@ -187,7 +409,11 @@ const app = new Hono<AuthenticatedEnv>()
 
       const result = streamText({
         model: resolvedModel.model,
-        system: buildSystemPrompt({ mode, model }),
+        system: buildSystemPrompt({
+          mode,
+          model: effectiveModelId,
+          compactionSummary: activeCompactionSummary,
+        }),
         messages: modelMessages,
         tools,
         providerOptions: resolvedModel.providerOptions,
@@ -203,16 +429,25 @@ const app = new Hono<AuthenticatedEnv>()
         originalMessages: nextMessages,
         messageMetadata({ part }) {
           if (part.type === "start") {
-            return { mode, model };
+            return {
+              mode,
+              model: effectiveModelId,
+              ...(compactionEvent ? { compaction: compactionEvent } : {}),
+            };
           }
 
           if (part.type !== "finish") return undefined;
 
           return {
             mode,
-            model,
+            model: effectiveModelId,
             durationMs: Date.now() - startTime,
             ...(completedUsage ? { usage: completedUsage } : {}),
+            ...(compactionEvent ? { compaction: compactionEvent } : {}),
+            contextUsage: {
+              estimatedTokens: finalProjection,
+              contextWindow,
+            },
           };
         },
         async onFinish(event) {
@@ -220,10 +455,24 @@ const app = new Hono<AuthenticatedEnv>()
 
           if (hasPendingToolCalls(event.responseMessage)) return;
 
+          // `event.messages` is `nextMessages` (the working set we sent) plus
+          // whatever the model produced. Persist that as the new working
+          // context, and append only the *new* assistant/tool messages to the
+          // raw transcript so we don't accidentally drop any history.
+          const newAssistantMessages = event.messages.slice(workingMerged.length);
+          const rawAfter = [...rawMerged, ...newAssistantMessages];
+
           await db.session.update({
             where: { id, userId },
             data: {
-              messages: event.messages as unknown as Prisma.InputJsonValue,
+              messages: rawAfter as unknown as Prisma.InputJsonValue,
+              workingMessages: event.messages as unknown as Prisma.InputJsonValue,
+              ...(compactionEvent
+                ? {
+                    compactionSummary: activeCompactionSummary,
+                    compactionAt: new Date(),
+                  }
+                : {}),
             },
           });
 
@@ -265,7 +514,10 @@ const app = new Hono<AuthenticatedEnv>()
           }
         },
         onError(error) {
-          return error instanceof Error ? error.message : String(error);
+          // Same protection as app.onError: a raw AI_APICallError.message can
+          // include the full request body, which surfaces in the CLI as a
+          // dump of the whole conversation.
+          return safeErrorMessage(error, "Upstream model request failed");
         },
       });
     },

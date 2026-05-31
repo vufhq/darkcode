@@ -8,7 +8,7 @@ import { TextAttributes } from "@opentui/core";
 import type { TextareaRenderable, ScrollBoxRenderable } from "@opentui/core";
 import { useKeyboard, useRenderer } from "@opentui/react";
 import type { KeyBinding } from "@opentui/core";
-import { useNavigate } from "react-router";
+import { useNavigate, useParams } from "react-router";
 import { EmptyBorder } from "./border";
 import { StatusBar } from "./status-bar";
 import { CommandMenu } from "./command-menu";
@@ -270,7 +270,7 @@ export const TEXTAREA_KEY_BINDINGS: KeyBinding[] = [
 ];
 
 export function InputBar({ onSubmit, disabled = false }: Props) {
-  const { mode, toggleMode, setMode, model, setModel } = usePromptConfig();
+  const { mode, toggleMode, setMode, model, setModel, posture, setPosture } = usePromptConfig();
   const textareaRef = useRef<TextareaRenderable>(null);
   const onSubmitRef = useRef<() => void>(() => {});
   const activeMentionRef = useRef<MentionMatch | null>(null);
@@ -278,6 +278,9 @@ export function InputBar({ onSubmit, disabled = false }: Props) {
 
   const renderer = useRenderer();
   const navigate = useNavigate();
+  // Nested under `/sessions/:id` in the router; absent on the home screen.
+  // `/compact` uses it; other commands ignore it.
+  const { id: sessionIdFromRoute } = useParams();
   const toast = useToast();
   const dialog = useDialog();
   const { colors } = useTheme();
@@ -400,11 +403,14 @@ export function InputBar({ onSubmit, disabled = false }: Props) {
         setMode,
         model,
         setModel,
+        sessionId: sessionIdFromRoute,
+        posture,
+        setPosture,
       });
     } else {
       textarea.insertText(command.value + " ");
     }
-  }, [renderer, toast, dialog, navigate, mode, setMode, model, setModel]);
+  }, [renderer, toast, dialog, navigate, mode, setMode, model, setModel, sessionIdFromRoute, posture, setPosture]);
 
   const handleCommandExecute = useCallback(
     (index: number) => {

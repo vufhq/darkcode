@@ -40,6 +40,53 @@ export const toolInputSchemas = {
     description: z.string().optional().describe("Short description of the command"),
     timeout: z.number().optional().describe("Timeout in milliseconds"),
   }),
+  // LSP tools — available in both PLAN and BUILD modes (read-only).
+  lspDefinition: z.object({
+    path: z.string().describe("Relative path to the file"),
+    line: z.number().int().min(0).describe("Zero-based line number of the symbol"),
+    character: z.number().int().min(0).describe("Zero-based character offset of the symbol"),
+  }),
+  lspReferences: z.object({
+    path: z.string().describe("Relative path to the file"),
+    line: z.number().int().min(0).describe("Zero-based line number of the symbol"),
+    character: z.number().int().min(0).describe("Zero-based character offset of the symbol"),
+    includeDeclaration: z
+      .boolean()
+      .default(true)
+      .describe("Whether to include the symbol declaration in results"),
+  }),
+  lspHover: z.object({
+    path: z.string().describe("Relative path to the file"),
+    line: z.number().int().min(0).describe("Zero-based line number of the symbol"),
+    character: z.number().int().min(0).describe("Zero-based character offset of the symbol"),
+  }),
+  lspDiagnostics: z.object({
+    path: z.string().describe("Relative path to the file to get diagnostics for"),
+  }),
+} as const;
+
+/** LSP tool contracts — available in both PLAN and BUILD modes (read-only). */
+export const lspToolContracts = {
+  lspDefinition: tool({
+    description:
+      "Go to the definition of a symbol at a given file position using the language server. Returns location(s) of the definition.",
+    inputSchema: toolInputSchemas.lspDefinition,
+  }),
+  lspReferences: tool({
+    description:
+      "Find all references to a symbol at a given file position using the language server.",
+    inputSchema: toolInputSchemas.lspReferences,
+  }),
+  lspHover: tool({
+    description:
+      "Get hover information (type signature, documentation) for a symbol at a given file position using the language server.",
+    inputSchema: toolInputSchemas.lspHover,
+  }),
+  lspDiagnostics: tool({
+    description:
+      "Get language-server diagnostics (errors and warnings) for a file. Useful after edits to check for type errors or syntax problems.",
+    inputSchema: toolInputSchemas.lspDiagnostics,
+  }),
 } as const;
 
 export const readOnlyToolContracts = {
@@ -60,6 +107,7 @@ export const readOnlyToolContracts = {
       "Search file contents with a regular expression under the current project directory.",
     inputSchema: toolInputSchemas.grep,
   }),
+  ...lspToolContracts,
 } as const;
 
 export const buildToolContracts = {

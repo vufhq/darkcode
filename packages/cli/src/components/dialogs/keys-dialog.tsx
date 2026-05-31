@@ -11,6 +11,10 @@ import {
   type ByokProvider,
 } from "@darkcode/shared";
 
+// Providers that authenticate via a key vs. those that are always available
+// without one (e.g. Ollama running locally).
+const KEYLESS_PROVIDERS = new Set<ByokProvider>(["ollama"]);
+
 type ProviderRow = {
   provider: ByokProvider;
   label: string;
@@ -29,6 +33,16 @@ export function KeysDialogContent() {
 
   const handleSelect = useCallback(
     (row: ProviderRow) => {
+      // Keyless providers (e.g. Ollama) don't need a stored key — just inform
+      // the user that the provider is available without authentication.
+      if (KEYLESS_PROVIDERS.has(row.provider)) {
+        toast.show({
+          variant: "success",
+          message: `${row.label} runs locally — no API key required`,
+        });
+        return;
+      }
+
       const existing = getApiKey(row.provider);
 
       if (existing) {
@@ -61,7 +75,13 @@ export function KeysDialogContent() {
       onSelect={handleSelect}
       filterFn={(row, query) => row.label.toLowerCase().includes(query.toLowerCase())}
       renderItem={(row, isSelected) => {
-        const hasKey = getApiKey(row.provider) != null;
+        const isKeyless = KEYLESS_PROVIDERS.has(row.provider);
+        const hasKey = !isKeyless && getApiKey(row.provider) != null;
+        const hint = isKeyless
+          ? "no key required · local"
+          : hasKey
+            ? "set · enter to clear"
+            : "not set · enter to add";
         return (
           <box flexDirection="row" width="100%" paddingX={1} gap={1}>
             <box flexGrow={1}>
@@ -74,7 +94,7 @@ export function KeysDialogContent() {
               attributes={TextAttributes.DIM}
               fg={isSelected ? "black" : "gray"}
             >
-              {hasKey ? "set · enter to clear" : "not set · enter to add"}
+              {hint}
             </text>
           </box>
         );
