@@ -28,6 +28,12 @@ jobs:
   build:
     name: ${{ matrix.asset }}
     runs-on: ${{ matrix.runner }}
+    # `bun install` runs @darkcode/server's postinstall -> `prisma generate`,
+    # which loads prisma.config.ts and resolves DATABASE_URL via prisma's strict
+    # env(). generate never connects and the CLI binary contains no database
+    # code, so a throwaway value is enough. Mirrors the Dockerfile deps stage.
+    env:
+      DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
     strategy:
       fail-fast: false
       matrix:

@@ -18,6 +18,12 @@ jobs:
   test:
     name: Test + typecheck
     runs-on: ubuntu-latest
+    # `bun install` runs @darkcode/server's postinstall -> `prisma generate`,
+    # which loads prisma.config.ts and resolves DATABASE_URL via prisma's strict
+    # env(). generate never connects, so a throwaway value suffices here (the
+    # `migrations` job below uses a real Postgres service + URL).
+    env:
+      DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
     steps:
       - uses: actions/checkout@v4
 
