@@ -22,6 +22,14 @@ COPY packages/database/package.json ./packages/database/package.json
 COPY packages/database/prisma ./packages/database/prisma
 COPY packages/database/prisma.config.ts ./packages/database/prisma.config.ts
 
+# `bun install` runs @darkcode/server's postinstall → `prisma generate`, which
+# loads packages/database/prisma.config.ts. That config eagerly resolves
+# DATABASE_URL via prisma's strict env() helper — but `generate` only reads the
+# schema and never opens a connection. Supply a throwaway URL so the build
+# stage succeeds. This ENV lives only in the `deps` stage; the runtime stage is
+# a separate FROM and receives the real DATABASE_URL from the platform.
+ENV DATABASE_URL="postgresql://placeholder:placeholder@localhost:5432/placeholder"
+
 RUN bun install --frozen-lockfile
 
 # ---------- runtime stage ----------
