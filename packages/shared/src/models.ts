@@ -70,6 +70,10 @@ type BaseModelDefinition = {
   // The fallback inherits the user's BYOK keys — if the fallback also
   // requires a key the user doesn't have, the original error surfaces.
   fallback?: string;
+  // When true, DarkCode can host this model on its own infrastructure (using
+  // our API keys) and bill the user in credits. When false, the model can
+  // only be used via BYOK or is free (e.g. Ollama).
+  canBeHosted: boolean;
 };
 
 type DarkcodeModelDefinition = BaseModelDefinition & {
@@ -132,8 +136,9 @@ export const SUPPORTED_CHAT_MODELS = [
   {
     id: "darkcode-ai",
     provider: "darkcode",
-    displayName: "DarkCode AI",
+    displayName: "Kimi K2.6",
     requiresApiKey: false,
+    canBeHosted: true,
     // Pricing reflects what we pay upstream (Kimi K2). Resold as DarkCode credits.
     pricing: {
       inputUsdPerMillionTokens: 0.6,
@@ -149,6 +154,7 @@ export const SUPPORTED_CHAT_MODELS = [
     provider: "anthropic",
     displayName: "Claude Sonnet 4.6",
     requiresApiKey: true,
+    canBeHosted: true,
     byokProvider: "anthropic",
     pricing: {
       inputUsdPerMillionTokens: 3,
@@ -162,6 +168,7 @@ export const SUPPORTED_CHAT_MODELS = [
     provider: "anthropic",
     displayName: "Claude Haiku 4.5",
     requiresApiKey: true,
+    canBeHosted: true,
     byokProvider: "anthropic",
     pricing: {
       inputUsdPerMillionTokens: 1,
@@ -174,6 +181,7 @@ export const SUPPORTED_CHAT_MODELS = [
     provider: "anthropic",
     displayName: "Claude Opus 4.6",
     requiresApiKey: true,
+    canBeHosted: true,
     byokProvider: "anthropic",
     pricing: {
       inputUsdPerMillionTokens: 5,
@@ -187,6 +195,7 @@ export const SUPPORTED_CHAT_MODELS = [
     provider: "openai",
     displayName: "GPT-5.4",
     requiresApiKey: true,
+    canBeHosted: true,
     byokProvider: "openai",
     pricing: {
       inputUsdPerMillionTokens: 2.5,
@@ -200,6 +209,7 @@ export const SUPPORTED_CHAT_MODELS = [
     provider: "openai",
     displayName: "GPT-5.4 mini",
     requiresApiKey: true,
+    canBeHosted: true,
     byokProvider: "openai",
     pricing: {
       inputUsdPerMillionTokens: 0.75,
@@ -212,6 +222,7 @@ export const SUPPORTED_CHAT_MODELS = [
     provider: "openai",
     displayName: "GPT-5.4 nano",
     requiresApiKey: true,
+    canBeHosted: true,
     byokProvider: "openai",
     pricing: {
       inputUsdPerMillionTokens: 0.2,
@@ -224,6 +235,7 @@ export const SUPPORTED_CHAT_MODELS = [
     provider: "openai-compatible",
     displayName: "DeepSeek V3",
     requiresApiKey: true,
+    canBeHosted: true,
     byokProvider: "deepseek",
     baseUrl: "https://api.deepseek.com/v1",
     upstreamModelId: "deepseek-chat",
@@ -238,6 +250,7 @@ export const SUPPORTED_CHAT_MODELS = [
     provider: "openai-compatible",
     displayName: "DeepSeek R1",
     requiresApiKey: true,
+    canBeHosted: true,
     byokProvider: "deepseek",
     baseUrl: "https://api.deepseek.com/v1",
     upstreamModelId: "deepseek-reasoner",
@@ -253,6 +266,7 @@ export const SUPPORTED_CHAT_MODELS = [
     provider: "google",
     displayName: "Gemini 2.5 Pro",
     requiresApiKey: true,
+    canBeHosted: true,
     byokProvider: "google",
     upstreamModelId: "gemini-2.5-pro",
     pricing: {
@@ -267,6 +281,7 @@ export const SUPPORTED_CHAT_MODELS = [
     provider: "google",
     displayName: "Gemini 2.5 Flash",
     requiresApiKey: true,
+    canBeHosted: true,
     byokProvider: "google",
     upstreamModelId: "gemini-2.5-flash",
     pricing: {
@@ -284,6 +299,7 @@ export const SUPPORTED_CHAT_MODELS = [
     provider: "ollama",
     displayName: "Ollama (local)",
     requiresApiKey: false,
+    canBeHosted: false,
     upstreamModelId: "qwen2.5-coder:7b",
     pricing: {
       // Local inference — no token cost.
@@ -313,6 +329,10 @@ export function getModelByokProvider(modelId: string): ByokProvider | null {
   const model = findSupportedChatModel(modelId);
   if (!model || !model.requiresApiKey) return null;
   return model.byokProvider;
+}
+
+export function modelCanBeHosted(modelId: string): boolean {
+  return findSupportedChatModel(modelId)?.canBeHosted ?? false;
 }
 
 export const DEFAULT_CHAT_MODEL_ID: SupportedChatModelId = "darkcode-ai";

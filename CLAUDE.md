@@ -58,7 +58,7 @@ Bun workspace with four packages in `packages/*`. Cross-package imports use the 
 - `lib/safe-error.ts` — strips provider request bodies out of `AI_APICallError` messages so the conversation isn't leaked back to the CLI as an error.
 - `routes/sessions.ts` — CRUD + `POST /:id/compact` (the `/compact` command).
 - `lib/polar.ts` + `lib/credits.ts` + `lib/polar-outbox.ts` — credit math + Polar SDK + a Postgres outbox that retries failed usage ingests. Event shape must stay exactly `{ name: "darkcode_usage", metadata: { credits } }` to match the Polar meter filter.
-- `system-prompt.ts` — branding-aware (hosted "DarkCode AI" identity vs. generic engineer for BYOK), mode-specific tool lists incl. LSP, and a `## Prior conversation digest` block when a compaction summary exists.
+- `system-prompt.ts` — branding-aware (hosted "Kimi K2.6" identity vs. generic engineer for BYOK), mode-specific tool lists incl. LSP, and a `## Prior conversation digest` block when a compaction summary exists.
 - `lib/env.ts` — zod-validated env. Model-relevant additions: `OLLAMA_BASE_URL` (default `http://localhost:11434/v1`), `OLLAMA_DEFAULT_MODEL`.
 
 ### `@darkcode/database` — Prisma
@@ -95,8 +95,8 @@ Bun workspace with four packages in `packages/*`. Cross-package imports use the 
 
 ### Models & billing
 
-- "DarkCode AI" is the user-facing label for the hosted Moonshot/Kimi model. Never reveal the upstream provider name (enforced in `system-prompt.ts`).
-- **Only the hosted `darkcode` model is metered** (`isMetered: true`). All BYOK models — Anthropic, OpenAI, DeepSeek, **Google/Gemini** — and **Ollama** (local) are `isMetered: false`; usage ingest is skipped. Credit-depleted fallback to a BYOK model is also unmetered.
+- "Kimi K2.6" is the user-facing label for the hosted Moonshot/Kimi model. Never reveal the upstream provider name (enforced in `system-prompt.ts`).
+- **Metering is per-resolution, not per-model.** Any model DarkCode can host (`canBeHosted: true`) is metered (`isMetered: true`) **when it runs on our infra** — the hosted `darkcode` model always, and Anthropic/OpenAI/DeepSeek/**Google/Gemini** when the user has **no** BYOK key for that provider and the server has the provider's hosted key configured (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `GOOGLE_API_KEY`). The **same model id is unmetered** when the user supplies a BYOK key (`isMetered: false`) — their key always wins. **Ollama** (local, `canBeHosted: false`) is always unmetered. `chat.ts` resolves the model first, then gates credits on `resolvedModel.isMetered`; `credits.ts` no longer rejects third-party models (the "don't double-charge BYOK" guard is now the `isMetered` check at the call site). Credit-depleted fallback to a BYOK model is also unmetered.
 - The Polar meter is keyed off the event `name` + `credits` metadata — don't rename either without updating the Polar dashboard filter.
 
 ## Feature status (what to build on, what's missing)
@@ -122,6 +122,8 @@ The unbuilt phases still have their build-agent briefs in `.claude/agents/darkco
 - **`lsp.symbols` is still not built** (workspace/document symbol search) — see Feature status. The other LSP tools (`lspDefinition`/`lspReferences`/`lspHover`/`lspDiagnostics`) and the post-edit diagnostics loop work cross-platform, including Windows.
 
 _Recently fixed (were listed here): Windows LSP binary resolution (`lib/lsp/client.ts` now uses a PATHEXT-aware `resolveBinaryPath` instead of `spawn("which")` — verified spawning `typescript-language-server` and returning diagnostics on Windows); the LSP pool no longer installs Ctrl+C-hijacking `SIGINT`/`SIGTERM` handlers (cleanup is synchronous on `exit` via `LspClient.killSync()`); `auto-edit` posture now enforces the fs `denyWrite` list before auto-allowing; and the default bash policy no longer auto-allows `cat`/`head`/`tail **` (they route to a prompt)._
+
+_Chatting in an old session could throw and dump the **whole conversation** as a red error in the CLI. Two root causes, both fixed in `chat.ts`: (1) a failed/aborted turn can persist an assistant **husk** (`{ id: "", parts: [] }`); `validateUIMessages` rejects it and its error embeds the entire message array — `sanitizeMessages()` now drops content-less messages and backfills missing ids on both the raw and working sets before validation, recovering corrupted sessions. (2) the transcript was validated/converted against the **mode-restricted** tool set, so a `bash`/`write`/MCP tool part recorded in a past turn (esp. a dangling one) hit "No tool schema found for tool part …"; `validateUIMessages`/`convertToModelMessages` now decode against the BUILD **superset** (`decodeTools`), while only `streamText`'s `tools` stay mode-restricted. The dump itself happened because `@ai-sdk/react` throws `new Error(await response.text())` on a non-2xx, making the whole response body the `chat.error.message`, and `index.ts`'s dev error branch returned it unclipped. Hardened both ends too: `index.ts` now `clip()`s every error body (even in dev), and the CLI `formatChatErrorMessage()` unwraps `{"error":…}` and caps length._
 
 ## TypeScript
 

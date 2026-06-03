@@ -1,6 +1,5 @@
+import { API_URL } from "./config";
 import { clearAuth, getAuth, saveAuth, type AuthData } from "./auth";
-
-const API_URL = process.env.API_URL ?? "http://localhost:3000";
 
 type RefreshResponse = {
   accessToken: string;

@@ -14,6 +14,17 @@ const refreshValidator = zValidator("json", refreshSchema, (result, c) => {
 });
 
 const app = new Hono<AuthenticatedEnv>()
+  // Public OAuth parameters the CLI needs to start the PKCE browser flow,
+  // before the user is authenticated. Only public values are exposed here —
+  // never CLERK_OAUTH_CLIENT_SECRET. This lets the shipped CLI binary bake in
+  // just the API URL and source Clerk config from the server (single source of
+  // truth), so rotating Clerk config never requires a CLI rebuild.
+  .get("/config", (c) =>
+    c.json({
+      clerkFrontendApi: env.CLERK_FRONTEND_API,
+      clientId: env.CLERK_OAUTH_CLIENT_ID,
+    }),
+  )
   .get("/callback", (c) => {
     const code = c.req.query("code");
     const state = c.req.query("state");

@@ -6,7 +6,7 @@ import { bodyLimit } from "hono/body-limit";
 import { env, isProduction } from "./lib/env";
 import { initSentry, captureException, Sentry } from "./lib/sentry";
 import { logger } from "./lib/logger";
-import { safeErrorMessage } from "./lib/safe-error";
+import { clip, safeErrorMessage } from "./lib/safe-error";
 import { startPolarOutboxSweeper, stopPolarOutboxSweeper } from "./lib/polar-outbox";
 import { closeRedis } from "./lib/redis";
 import { db } from "@darkcode/database/client";
@@ -24,6 +24,10 @@ startPolarOutboxSweeper();
 
 const corsOrigins = env.CORS_ORIGINS.split(",").map((s) => s.trim()).filter(Boolean);
 const corsAllowAll = corsOrigins.length === 1 && corsOrigins[0] === "*";
+const corsLocalhostOnly =
+  !corsAllowAll &&
+  corsOrigins.length > 0 &&
+  corsOrigins.every((o) => /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(o));
 
 const app = new Hono<RequestContextEnv>();
 
@@ -70,10 +74,14 @@ app.onError((error, c) => {
 
   log.error({ err: error }, "unhandled_server_error");
   captureException(error, { userId, requestId });
+  // Even in development, clip the message to a single short line. Some SDK
+  // errors (AI_APICallError, message-validation errors) carry the entire
+  // request body in `.message`; the CLI throws `new Error(await res.text())`,
+  // so an unclipped body lands in the TUI as a full-conversation dump.
   const message = isProduction
     ? "Internal server error"
     : error instanceof Error
-      ? `${error.name}: ${error.message}`
+      ? clip(`${error.name}: ${error.message}`)
       : "Internal server error";
   return c.json({ error: message, requestId }, 500);
 });
@@ -147,6 +155,10 @@ if (isProduction) {
   }
   if (corsAllowAll) {
     logger.warn("production.cors_wildcard — CORS_ORIGINS=* in production; lock this down");
+  } else if (corsLocalhostOnly) {
+    logger.warn(
+      "production.cors_localhost_only — CORS_ORIGINS is localhost-only in production; your website origin likely can't reach the API. Set CORS_ORIGINS to the deployed website origin.",
+    );
   }
   if (!env.SENTRY_DSN) {
     logger.warn("production.sentry_missing — unhandled errors will not be captured");

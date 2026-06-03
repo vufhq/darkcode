@@ -7,7 +7,11 @@
 
 const MAX_LENGTH = 400;
 
-function clip(value: string): string {
+// Reduce an arbitrary error string to a single short line. Exported so the
+// top-level error handler can apply the same clamp to *any* error body — even
+// in development — so a stray AI_APICallError / validation error can never dump
+// the full request (system prompt + messages + tool results) back to the CLI.
+export function clip(value: string): string {
   const oneLine = value.split("\n")[0] ?? value;
   return oneLine.length > MAX_LENGTH ? `${oneLine.slice(0, MAX_LENGTH)}…` : oneLine;
 }

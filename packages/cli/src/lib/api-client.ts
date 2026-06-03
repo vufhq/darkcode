@@ -1,5 +1,6 @@
 import { hc } from "hono/client";
 import type { AppType } from "@darkcode/server";
+import { API_URL } from "./config";
 import { clearAuth, getAuth, isAccessTokenExpired } from "./auth";
 import { refreshAccessToken } from "./refresh";
 
@@ -12,7 +13,7 @@ function applyAuthHeader(headers: Headers, token: string | null) {
 }
 
 export const apiClient = hc<AppType>(
-  process.env.API_URL ?? "http://localhost:3000",
+  API_URL,
   {
     fetch: async (
       input: Parameters<typeof fetch>[0],

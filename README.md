@@ -13,23 +13,46 @@
 
 <br />
 
+## Install
+
+DarkCode ships as a single self-contained binary — no runtime to install.
+
+**macOS / Linux**
+
+```sh
+curl -fsSL https://darkcode.sh/install.sh | sh
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://darkcode.sh/install.ps1 | iex
+```
+
+Then run `darkcode` in any project and use `/login` to sign in. All download
+options live at [darkcode.sh/download](https://darkcode.sh/download).
+
+Want to run your own instance? See [DEPLOY.md](./DEPLOY.md).
+
 ## Features
 
 - **Terminal AI Chat** — Run an AI coding assistant directly in your terminal with an OpenTUI and React interface
 - **Plan and Build Modes** — Use read-only planning tools or enable write, edit, and shell execution tools for implementation
 - **Streaming Responses** — Stream model output through the AI SDK with persisted session history
 - **Local Project Tools** — Read files, list directories, glob, grep, write files, edit files, and run shell commands inside the current project
-- **Multi-Model Support** — Ship with **DarkCode AI** as the default hosted model, plus bring-your-own-key support for Anthropic Claude and OpenAI GPT models
+- **Multi-Model Support** — Ship with **Kimi K2.6** as the default hosted model, plus Anthropic Claude, OpenAI GPT, DeepSeek, and Google Gemini (hosted on credits or bring-your-own-key) and local Ollama models
 - **Persistent Sessions** — Store authenticated user sessions and messages in Postgres via Prisma
 - **Clerk OAuth** — Authenticate the CLI through a browser-based Clerk OAuth flow
 - **Usage Billing** — Meter AI usage as credits through Polar before allowing session and chat actions
 
 ## Models
 
-DarkCode ships with two tiers of models:
+DarkCode supports a range of models with flexible billing:
 
-- **DarkCode AI (default, hosted)** — Runs on infrastructure you operate using a single `MOONSHOT_API_KEY`. End users never see the upstream provider — the CLI labels it as "DarkCode AI". Usage is billed through Polar credits.
-- **Bring Your Own Key (BYOK)** — Anthropic Claude and OpenAI GPT models. Each user adds their own provider API key with `/keys` in the CLI. Their key is stored locally at `~/.darkcode/api-keys.json`, sent to the server only as a forwarding header, and never persisted. BYOK calls don't consume DarkCode credits.
+- **Kimi K2.6 (default, hosted)** — Runs on infrastructure you operate using a single `MOONSHOT_API_KEY`. End users never see the upstream provider — the CLI labels it as "Kimi K2.6". Usage is billed through Polar credits.
+- **Hosted on credits** — Anthropic Claude, OpenAI GPT, DeepSeek, and Google Gemini also run on your infrastructure (using the matching server-side key) and are metered as credits, so a user can pick them without bringing their own key.
+- **Bring Your Own Key (BYOK)** — A user's own key always wins and is never metered. Add one with `/keys`; it's stored locally at `~/.darkcode/api-keys.json`, sent to the server only as a forwarding header, and never persisted.
+- **Local (Ollama)** — Point at a local Ollama endpoint to run models entirely on your own machine, always unmetered.
 
 Switch between models at any time with `/models`. If a model needs a key the CLI doesn't already have, the model picker prompts for one inline.
 
@@ -40,14 +63,14 @@ Switch between models at any time with `/models`. If a model needs a key the CLI
 - [Bun](https://bun.sh) installed
 - PostgreSQL database (e.g. [Neon](https://neon.tech))
 - [Clerk](https://clerk.com) application configured for OAuth
-- A [Moonshot AI](https://platform.moonshot.ai) API key for the hosted **DarkCode AI** model
+- A [Moonshot AI](https://platform.moonshot.ai) API key for the hosted **Kimi K2.6** model
 - Optional: Anthropic or OpenAI API keys, supplied by end users via `/keys` (BYOK)
 - [Polar](https://polar.sh) account and credits meter
 
 ### 1. Clone and install
 
 ```bash
-git clone git@github.com:code-with-antonio/darkcode.git
+git clone git@github.com:vufhq/darkcode.git
 cd darkcode
 bun install
 ```
@@ -64,7 +87,7 @@ Fill in the required values:
 API_URL=http://localhost:3000
 DATABASE_URL=
 
-# Powers the hosted "DarkCode AI" model.
+# Powers the hosted "Kimi K2.6" model.
 MOONSHOT_API_KEY=
 
 CLERK_FRONTEND_API=

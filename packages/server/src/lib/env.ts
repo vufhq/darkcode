@@ -9,16 +9,28 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).optional(),
 
+  // Max wall-clock duration (ms) for a single streaming model turn — covers
+  // the optional compaction summarizer call plus the main stream. Bounds a
+  // hung or trickling upstream provider so it can't pin a request open. Keep
+  // it under Bun's socket idleTimeout (255s).
+  CHAT_STREAM_TIMEOUT_MS: z.coerce.number().int().positive().default(240_000),
+
   // Database. DATABASE_URL is the runtime (pooled) connection. The optional
   // DIRECT_DATABASE_URL points at the non-pooled endpoint and is used only by
   // Prisma migrate, which can't run over PgBouncer's transaction pool.
   DATABASE_URL: NonEmpty,
   DIRECT_DATABASE_URL: Optional,
 
-  // Hosted DarkCode AI (Moonshot upstream)
+  // Hosted Kimi K2.6 (Moonshot upstream)
   MOONSHOT_API_KEY: NonEmpty,
   MOONSHOT_BASE_URL: z.string().url().default("https://api.moonshot.ai/v1"),
   DARKCODE_BACKING_MODEL: z.string().default("kimi-k2.6"),
+
+  // Hosted provider API keys (optional — used when users don't BYOK)
+  ANTHROPIC_API_KEY: Optional,
+  OPENAI_API_KEY: Optional,
+  DEEPSEEK_API_KEY: Optional,
+  GOOGLE_API_KEY: Optional,
 
   // Clerk
   CLERK_FRONTEND_API: NonEmpty,
@@ -44,8 +56,12 @@ const schema = z.object({
   SENTRY_RELEASE: Optional,
   SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0),
 
-  // CORS — comma-separated allowlist of origins, "*" allows all (default).
-  CORS_ORIGINS: z.string().default("*"),
+  // CORS — comma-separated allowlist of browser origins for the website.
+  // Defaults to the local Vite dev origin; set this to your deployed website
+  // origin(s) in production. "*" is still honored (with credentials disabled)
+  // but is intentionally NOT the default — a wildcard lets any site call the
+  // authenticated API. The CLI is a non-browser client and ignores CORS.
+  CORS_ORIGINS: z.string().default("http://localhost:5173"),
 
   // Rate-limit / cache store. Leave empty to use the in-memory fallback.
   REDIS_URL: Optional,

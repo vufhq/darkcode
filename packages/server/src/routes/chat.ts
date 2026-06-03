@@ -22,10 +22,12 @@ import {
   getModelContextWindow,
   getModelFallbackId,
   getToolContracts,
+  Mode,
   modeSchema,
   type ModeType,
   type ToolContracts,
 } from "@darkcode/shared";
+import { env } from "../lib/env";
 import { buildSystemPrompt } from "../system-prompt";
 import { compactWorkingContext } from "../lib/compaction";
 import { projectNextRequestTokens } from "../lib/token-estimate";
@@ -39,9 +41,11 @@ import { captureException } from "../lib/sentry";
 import { logAuditEvent } from "../lib/audit";
 import {
   ApiKeyRequiredError,
+  HostedProviderNotConfiguredError,
   isSupportedChatModel,
   resolveChatModel,
   type ProviderApiKeys,
+  type ResolvedModel,
 } from "../lib/models";
 
 type ChatMessageMetadata = {
@@ -120,6 +124,29 @@ function hasPendingToolCalls(message: DarkcodeUIMessage) {
   });
 };
 
+// A failed or aborted turn can leave an assistant "husk" in the stored
+// transcript — a message with no parts and/or an empty id (e.g. a turn that
+// errored before the model produced anything). The AI SDK's
+// `validateUIMessages` rejects these, and its error embeds the ENTIRE message
+// array, which previously surfaced in the CLI as a full-conversation dump and
+// made the session impossible to chat in. Drop content-less messages and
+// backfill any missing id so the transcript always validates, recovering old
+// corrupted sessions and preventing us from re-persisting the husk.
+function sanitizeMessages(messages: DarkcodeUIMessage[]): DarkcodeUIMessage[] {
+  const cleaned: DarkcodeUIMessage[] = [];
+  for (const message of messages) {
+    if (!message || !Array.isArray(message.parts) || message.parts.length === 0) {
+      continue;
+    }
+    if (typeof message.id !== "string" || message.id.length === 0) {
+      cleaned.push({ ...message, id: `restored-${cleaned.length}-${Date.now()}` });
+    } else {
+      cleaned.push(message);
+    }
+  }
+  return cleaned;
+}
+
 function readApiKeysFromHeaders(headers: Headers): ProviderApiKeys {
   const apiKeys: ProviderApiKeys = {};
   for (const provider of BYOK_PROVIDERS) {
@@ -155,7 +182,7 @@ const app = new Hono<AuthenticatedEnv>()
         }
       }
 
-      let modelDefinition = findSupportedChatModel(model);
+      const modelDefinition = findSupportedChatModel(model);
       if (!modelDefinition) {
         return c.json({ error: "Unsupported model" }, 400);
       }
@@ -166,39 +193,80 @@ const app = new Hono<AuthenticatedEnv>()
       let effectiveModelId: string = model;
       const apiKeys = readApiKeysFromHeaders(c.req.raw.headers);
 
-      // Only meter against DarkCode credits when the user is using a model we host.
-      // BYOK models bill against the user's own provider account, so we skip the gate.
-      if (!modelDefinition.requiresApiKey) {
+      // Resolve the model up front so the credit gate can key off how the turn
+      // will actually run. A model is *metered* (billed in DarkCode credits)
+      // only when it resolves to our hosted infra; if the user supplied a BYOK
+      // key for its provider it resolves to their account instead and isn't
+      // metered. resolveChatModel already encodes that BYOK-vs-hosted decision,
+      // so we reuse it rather than re-deriving the billing mode from the
+      // registry (which is what `requiresApiKey` alone can't tell us anymore —
+      // hosted Claude/GPT/etc. are now metered even though they "require" a key).
+      let resolvedModel: ResolvedModel;
+      try {
+        resolvedModel = resolveChatModel(effectiveModelId, apiKeys);
+      } catch (error) {
+        if (error instanceof ApiKeyRequiredError) {
+          return c.json(
+            {
+              error: `Missing ${error.provider} API key. Run /keys to add one.`,
+              provider: error.provider,
+            },
+            400,
+          );
+        }
+        if (error instanceof HostedProviderNotConfiguredError) {
+          // We can't host this model (no server-side key for its provider) and
+          // the user hasn't brought their own — point them at BYOK.
+          return c.json(
+            {
+              error: `This model isn't available on credits right now. Add your own ${error.provider} API key with /keys to use it.`,
+              provider: error.provider,
+            },
+            400,
+          );
+        }
+        throw error;
+      }
+
+      // Gate on DarkCode credits only when this turn runs on our hosted infra.
+      // BYOK turns bill against the user's own provider account, so they're
+      // never gated. When a hosted turn has no credits left we swap to the
+      // model's registered fallback IF the user has that provider's BYOK key
+      // (so the fallback turn is unmetered); otherwise we refuse with 402.
+      if (resolvedModel.isMetered) {
+        let creditsBalance: number;
         try {
-          const creditsBalance = await getAvailableCreditsBalance(userId);
-          if (creditsBalance <= 0) {
-            // If the hosted model has a fallback and the user has the key
-            // for it, swap in the fallback instead of refusing the turn.
-            const fallbackId = getModelFallbackId(model);
-            const fallbackDef = fallbackId ? findSupportedChatModel(fallbackId) : null;
-            const fallbackKeyAvailable =
-              fallbackDef && fallbackDef.requiresApiKey
-                ? apiKeys[fallbackDef.byokProvider] != null
-                : fallbackDef != null;
-            if (fallbackDef && fallbackKeyAvailable) {
-              log.info(
-                { userId, requestId, from: model, to: fallbackDef.id },
-                "chat.credits_depleted_fallback",
-              );
-              modelDefinition = fallbackDef;
-              effectiveModelId = fallbackDef.id;
-            } else {
-              void logAuditEvent({ userId, action: "credits.depleted", requestId });
-              return c.json(
-                { error: "No credits remaining. Run /upgrade to buy more credits." },
-                402,
-              );
-            }
-          }
+          creditsBalance = await getAvailableCreditsBalance(userId);
         } catch (error) {
           log.error({ err: error }, "credits_balance_unavailable");
           captureException(error, { userId, requestId, tags: { kind: "polar_balance" } });
           return c.json({ error: "Unable to verify credits balance right now." }, 503);
+        }
+
+        if (creditsBalance <= 0) {
+          const fallbackId = getModelFallbackId(effectiveModelId);
+          const fallbackDef = fallbackId ? findSupportedChatModel(fallbackId) : null;
+          const fallbackKeyAvailable =
+            fallbackDef && fallbackDef.requiresApiKey
+              ? apiKeys[fallbackDef.byokProvider] != null
+              : fallbackDef != null;
+          if (fallbackDef && fallbackKeyAvailable) {
+            log.info(
+              { userId, requestId, from: effectiveModelId, to: fallbackDef.id },
+              "chat.credits_depleted_fallback",
+            );
+            effectiveModelId = fallbackDef.id;
+            // Re-resolve as the fallback. fallbackKeyAvailable guarantees the
+            // BYOK key is present, so this resolves to the user's account
+            // (unmetered) and won't throw.
+            resolvedModel = resolveChatModel(effectiveModelId, apiKeys);
+          } else {
+            void logAuditEvent({ userId, action: "credits.depleted", requestId });
+            return c.json(
+              { error: "No credits remaining. Run /upgrade to buy more credits." },
+              402,
+            );
+          }
         }
       }
 
@@ -211,6 +279,16 @@ const app = new Hono<AuthenticatedEnv>()
       }
 
       const startTime = Date.now();
+
+      // One abort budget for the whole turn: fire if the client disconnects OR
+      // the turn exceeds the stream-timeout budget. Shared by the optional
+      // compaction summarizer call and the main stream below, so a hung or
+      // trickling upstream provider can't pin the request open indefinitely.
+      const turnAbortSignal = AbortSignal.any([
+        c.req.raw.signal,
+        AbortSignal.timeout(env.CHAT_STREAM_TIMEOUT_MS),
+      ]);
+
       // Merge MCP tools (CLI-side, discovered this turn) into the static
       // contracts. MCP entries have no `execute` — dispatch is client-side via
       // useChat's onToolCall, identical to the built-in tools. The merged set
@@ -233,22 +311,21 @@ const app = new Hono<AuthenticatedEnv>()
       }
       // The static type of `tools` is the built-in ToolContracts; we widen to
       // ToolSet for runtime use because the MCP set is discovered per-request.
+      // This is the set the *model* may call this turn — mode-restricted, so
+      // PLAN excludes write/edit/bash.
       const tools = { ...builtInTools, ...mcpDynamicTools } as unknown as ToolSet;
-      let resolvedModel;
-      try {
-        resolvedModel = resolveChatModel(effectiveModelId, apiKeys);
-      } catch (error) {
-        if (error instanceof ApiKeyRequiredError) {
-          return c.json(
-            {
-              error: `Missing ${error.provider} API key. Run /keys to add one.`,
-              provider: error.provider,
-            },
-            400,
-          );
-        }
-        throw error;
-      }
+
+      // Decoding the stored transcript is mode-independent: a session created
+      // in BUILD can be continued in PLAN, and its history legitimately holds
+      // write/edit/bash tool parts (including a dangling one from an
+      // interrupted turn). validateUIMessages/convertToModelMessages need every
+      // tool that could appear in history, or they throw "No tool schema found
+      // for tool part …" — which previously surfaced as a full-transcript dump.
+      // So we decode against the BUILD superset; the model is still restricted
+      // to `tools` above.
+      const decodeContracts = getToolContracts(Mode.BUILD);
+      const decodeTools = { ...decodeContracts, ...mcpDynamicTools } as unknown as ToolSet;
+
       // Merge incoming messages into both the raw transcript and the working
       // context separately. The raw transcript (`session.messages`) is
       // append-only and never edited by compaction; the working context
@@ -279,8 +356,10 @@ const app = new Hono<AuthenticatedEnv>()
         return merged;
       }
 
-      const rawMerged = mergeIncoming(rawPrevious);
-      let workingMerged = mergeIncoming(workingPrevious);
+      // Sanitize after merging so a husk from a previously-errored turn can't
+      // make `validateUIMessages` reject the whole transcript below.
+      const rawMerged = sanitizeMessages(mergeIncoming(rawPrevious));
+      let workingMerged = sanitizeMessages(mergeIncoming(workingPrevious));
 
       // Compaction trigger: project the next request's token count against the
       // model's context window. Compact at >=75% so the model has headroom
@@ -318,6 +397,7 @@ const app = new Hono<AuthenticatedEnv>()
             pinnedMessageIds: session.pinnedMessageIds ?? [],
             previousSummary: activeCompactionSummary,
             summarizerModel: resolvedModel.model,
+            abortSignal: turnAbortSignal,
           });
 
           if (result.droppedCount > 0) {
@@ -402,9 +482,9 @@ const app = new Hono<AuthenticatedEnv>()
 
       const nextMessages = await validateUIMessages<DarkcodeUIMessage>({
         messages: workingMerged,
-        tools,
+        tools: decodeTools,
       });
-      const modelMessages = await convertToModelMessages(nextMessages, { tools });
+      const modelMessages = await convertToModelMessages(nextMessages, { tools: decodeTools });
       let completedUsage: LanguageModelUsage | null = null;
 
       const result = streamText({
@@ -417,9 +497,10 @@ const app = new Hono<AuthenticatedEnv>()
         messages: modelMessages,
         tools,
         providerOptions: resolvedModel.providerOptions,
-        // Stop the upstream call when the client disconnects so we don't
-        // keep burning provider tokens after the user navigated away.
-        abortSignal: c.req.raw.signal,
+        // Abort when the client disconnects or the turn's timeout budget is
+        // exhausted (see turnAbortSignal above) so we don't keep burning
+        // provider tokens after the user navigated away or on a hung upstream.
+        abortSignal: turnAbortSignal,
         onFinish(event) {
           completedUsage = event.totalUsage;
         },

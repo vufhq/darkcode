@@ -1,32 +1,33 @@
-import { createCliRenderer } from "@opentui/core";
-import { createRoot } from "@opentui/react";
-import { createMemoryRouter, RouterProvider } from "react-router";
-import { initCliSentry } from "./lib/sentry";
-import { RootLayout } from "./layouts/root-layout";
-import { Home } from "./screens/home";
-import { NewSession } from "./screens/new-session";
-import { Session } from "./screens/session";
+#!/usr/bin/env bun
+import { VERSION } from "./lib/version";
 
-initCliSentry();
+const HELP = `darkcode — a terminal-based AI coding agent
 
-const router = createMemoryRouter([
-  {
-    path: "/",
-    element: <RootLayout />,
-    children: [
-      { index: true, element: <Home /> },
-      { path: "sessions/new", element: <NewSession /> },
-      { path: "sessions/:id", element: <Session /> },
-    ]
-  }
-]);
+Usage:
+  darkcode              Start the interactive agent in the current directory
+  darkcode --help       Show this help and exit
+  darkcode --version    Print the version and exit
 
-function App() {
-  return <RouterProvider router={router} />
+Environment overrides (optional):
+  DARKCODE_API_URL      API origin to connect to (default: https://api.darkcode.sh)
+
+Once running, use slash commands: /login, /models, /keys, /new, /sessions, /agents.
+Docs: https://darkcode.sh/docs
+`;
+
+const args = process.argv.slice(2);
+
+if (args.includes("--version") || args.includes("-v")) {
+  console.log(VERSION);
+  process.exit(0);
 }
 
-const renderer = await createCliRenderer({
-  targetFps: 60,
-  exitOnCtrlC: false,
-});
-createRoot(renderer).render(<App />);
+if (args.includes("--help") || args.includes("-h")) {
+  process.stdout.write(HELP);
+  process.exit(0);
+}
+
+// Defer the heavy OpenTUI import (which loads the native render library) until
+// after the fast-path flags above, so `--help`/`--version` never touch it.
+const { boot } = await import("./boot");
+await boot();

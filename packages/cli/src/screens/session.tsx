@@ -16,7 +16,7 @@ import { useChat } from "../hooks/use-chat";
 import { usePromptConfig } from "../providers/prompt-config";
 import type { Message } from "../hooks/use-chat";
 import { apiClient } from "../lib/api-client";
-import { getErrorMessage } from "../lib/http-errors";
+import { getErrorMessage, formatChatErrorMessage } from "../lib/http-errors";
 import { useKeyboardLayer } from "../providers/keyboard-layer";
 
 type SessionData = InferResponseType<(typeof apiClient.sessions)[":id"]["$get"], 200>;
@@ -128,7 +128,7 @@ function SessionChat({
       {messages.map((msg) => (
         <ChatMessage key={msg.id} msg={msg} />
       ))}
-      {error && <ErrorMessage message={error.message} />}
+      {error && <ErrorMessage message={formatChatErrorMessage(error.message)} />}
     </SessionShell>
   );
 }

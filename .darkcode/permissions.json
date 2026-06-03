@@ -1,0 +1,7 @@
+{
+  "mcp": {
+    "allow": [
+      "mcp__fs__read_text_file"
+    ]
+  }
+}

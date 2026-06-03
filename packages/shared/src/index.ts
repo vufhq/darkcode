@@ -9,6 +9,7 @@ export {
   getModelDisplayName,
   modelRequiresApiKey,
   getModelByokProvider,
+  modelCanBeHosted,
   getModelContextWindow,
   getModelFallbackId,
   type ModelPricing,

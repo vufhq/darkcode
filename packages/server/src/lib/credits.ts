@@ -61,10 +61,6 @@ function getModelPricing(provider: string, model: string): ModelPricing {
     throw new Error(`Unsupported billing model: ${model}`);
   }
 
-  if (supportedModel.requiresApiKey) {
-    throw new Error(`Model ${model} is BYOK and is not billed in DarkCode credits`);
-  }
-
   return supportedModel.pricing;
 };
 

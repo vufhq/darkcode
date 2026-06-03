@@ -3,8 +3,8 @@ import type { LanguageModelUsage } from "ai";
 
 import { calculateCreditsForUsage } from "./credits";
 
-// The hosted "darkcode-ai" model is the only metered model. Its pricing
-// (from the shared registry) is $0.60/M input, $2.50/M output. 1 credit = $0.01.
+// "darkcode-ai" is the default hosted model. Its pricing (from the shared
+// registry) is $0.60/M input, $2.50/M output. 1 credit = $0.01.
 const HOSTED = { provider: "darkcode", model: "darkcode-ai" };
 
 // calculateCreditsForUsage only reads inputTokens/outputTokens; the SDK's
@@ -52,16 +52,21 @@ describe("calculateCreditsForUsage — pricing math", () => {
 });
 
 describe("calculateCreditsForUsage — billing safety", () => {
-  test("refuses to bill a BYOK model (they bill against the user's own account)", () => {
-    // This is the guard that stops us double-charging a user who brought their
-    // own Anthropic key. It must throw, not silently meter.
-    expect(() =>
+  test("prices a hosted third-party model (now that DarkCode can host any model)", () => {
+    // A model like claude-haiku-4-5 used to throw here as a BYOK guard. With
+    // hosted credits for every model, the same model id can run either hosted
+    // (metered) or BYOK (unmetered) — they're indistinguishable from pricing
+    // alone. The "don't double-charge a BYOK user" guard therefore moved to
+    // the call site: chat.ts only calls this when resolvedModel.isMetered is
+    // true. Here we just verify the math: $1/M in + $5/M out over 1M each =
+    // $6.00 -> 600 credits.
+    expect(
       calculateCreditsForUsage({
         provider: "anthropic",
         model: "claude-haiku-4-5",
         usage: usage(1_000_000, 1_000_000),
       }),
-    ).toThrow(/BYOK and is not billed/);
+    ).toEqual({ credits: 600 });
   });
 
   test("rejects a provider/model mismatch", () => {

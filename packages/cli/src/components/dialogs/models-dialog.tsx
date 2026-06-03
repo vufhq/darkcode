@@ -29,10 +29,17 @@ export const ModelsDialogContent = ({
     (modelId: SupportedChatModelId) => {
       const definition = findSupportedChatModel(modelId);
       if (!definition) return;
+      const displayName = definition.displayName;
 
+      // Only force a key when the model can't run on DarkCode credits. Hostable
+      // models (canBeHosted) run on credits without a key — the user can still
+      // add one later via /keys to switch that model to BYOK. A model that both
+      // requires a key and can't be hosted is unusable without one, so prompt.
+      // (No such model exists today, so TS narrows that branch to `never`;
+      // capture `provider` while `definition` is still the BYOK variant.)
       if (definition.requiresApiKey) {
         const provider = definition.byokProvider;
-        if (!getApiKey(provider)) {
+        if (!definition.canBeHosted && !getApiKey(provider)) {
           dialog.open({
             title: `Add ${provider} API key`,
             children: (
@@ -42,7 +49,7 @@ export const ModelsDialogContent = ({
                   onSelectModel(modelId);
                   toast.show({
                     variant: "success",
-                    message: `Switched to ${definition.displayName}`,
+                    message: `Switched to ${displayName}`,
                   });
                 }}
               />
@@ -56,7 +63,7 @@ export const ModelsDialogContent = ({
       dialog.close();
       toast.show({
         variant: "success",
-        message: `Switched to ${definition.displayName}`,
+        message: `Switched to ${displayName}`,
       });
     },
     [dialog, onSelectModel, toast],
@@ -73,16 +80,24 @@ export const ModelsDialogContent = ({
         const definition = findSupportedChatModel(modelId);
         const isCurrent = modelId === currentModel;
         const requiresKey = definition?.requiresApiKey ?? false;
+        const canBeHosted = definition?.canBeHosted ?? false;
         const hasKey =
-          requiresKey && definition && definition.requiresApiKey
+          definition && definition.requiresApiKey
             ? getApiKey(definition.byokProvider) != null
-            : true;
+            : false;
 
+        // "Hosted" = keyless on our infra (the default model); "Local" = Ollama;
+        // "BYOK" = the user's own key; "Credits" = a hostable model with no key
+        // yet (runs on our infra, billed to credits); "Needs key" = BYOK-only.
         const tag = !requiresKey
-          ? "Hosted"
+          ? canBeHosted
+            ? "Hosted"
+            : "Local"
           : hasKey
             ? "BYOK"
-            : "Needs key";
+            : canBeHosted
+              ? "Credits"
+              : "Needs key";
 
         return (
           <box flexDirection="row" gap={1} width="100%" paddingX={1}>

@@ -59,7 +59,7 @@ const OPENAI_PROVIDER_OPTIONS: Partial<Record<OpenAIModelId, ProviderOptions>> =
 
 import { env } from "./env";
 
-// DarkCode AI is rebranded Kimi served from Moonshot's OpenAI-compatible API.
+// Kimi K2.6 is rebranded Kimi served from Moonshot's OpenAI-compatible API.
 // We pin the upstream model id here so callers only ever see the DarkCode label.
 const DARKCODE_BACKING_MODEL: Record<DarkcodeModelId, string> = {
   "darkcode-ai": env.DARKCODE_BACKING_MODEL,
@@ -71,7 +71,9 @@ function assertUnsupportedProvider(provider: never): never {
   throw new Error(`Unsupported provider: ${provider}`);
 }
 
-function resolveAnthropicModel(modelId: AnthropicModelId, apiKey: string): ResolvedModel {
+// ── BYOK resolvers (user brings their own key) ─────────────────────────────
+
+function resolveAnthropicModelByok(modelId: AnthropicModelId, apiKey: string): ResolvedModel {
   const anthropic = createAnthropic({ apiKey });
   return {
     model: anthropic(modelId),
@@ -82,7 +84,7 @@ function resolveAnthropicModel(modelId: AnthropicModelId, apiKey: string): Resol
   };
 }
 
-function resolveOpenAIModel(modelId: OpenAIModelId, apiKey: string): ResolvedModel {
+function resolveOpenAIModelByok(modelId: OpenAIModelId, apiKey: string): ResolvedModel {
   const openai = createOpenAI({ apiKey });
   return {
     model: openai(modelId),
@@ -93,7 +95,7 @@ function resolveOpenAIModel(modelId: OpenAIModelId, apiKey: string): ResolvedMod
   };
 }
 
-function resolveOpenAICompatibleModel(
+function resolveOpenAICompatibleModelByok(
   model: OpenAICompatibleModel,
   apiKey: string,
 ): ResolvedModel {
@@ -110,13 +112,79 @@ function resolveOpenAICompatibleModel(
   };
 }
 
-function resolveGoogleModel(model: GoogleModel, apiKey: string): ResolvedModel {
+function resolveGoogleModelByok(model: GoogleModel, apiKey: string): ResolvedModel {
   const google = createGoogleGenerativeAI({ apiKey });
   return {
     model: google(model.upstreamModelId),
     provider: "google",
     modelId: model.id,
     isMetered: false,
+  };
+}
+
+// ── Hosted resolvers (DarkCode proxies using our API keys) ─────────────────
+
+function resolveAnthropicModelHosted(modelId: AnthropicModelId): ResolvedModel {
+  const apiKey = env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new HostedProviderNotConfiguredError("anthropic");
+  }
+  const anthropic = createAnthropic({ apiKey });
+  return {
+    model: anthropic(modelId),
+    provider: "anthropic",
+    modelId,
+    providerOptions: ANTHROPIC_PROVIDER_OPTIONS[modelId],
+    isMetered: true,
+  };
+}
+
+function resolveOpenAIModelHosted(modelId: OpenAIModelId): ResolvedModel {
+  const apiKey = env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new HostedProviderNotConfiguredError("openai");
+  }
+  const openai = createOpenAI({ apiKey });
+  return {
+    model: openai(modelId),
+    provider: "openai",
+    modelId,
+    providerOptions: OPENAI_PROVIDER_OPTIONS[modelId],
+    isMetered: true,
+  };
+}
+
+function resolveOpenAICompatibleModelHosted(model: OpenAICompatibleModel): ResolvedModel {
+  // For openai-compatible providers, we use the same baseUrl but with our key.
+  // Each provider needs its own env var for the hosted key.
+  const apiKey = getHostedKeyForProvider(model.byokProvider);
+  if (!apiKey) {
+    throw new HostedProviderNotConfiguredError(model.byokProvider);
+  }
+  const provider = createOpenAI({
+    apiKey,
+    baseURL: model.baseUrl,
+  });
+
+  return {
+    model: provider.chat(model.upstreamModelId),
+    provider: "openai-compatible",
+    modelId: model.id,
+    isMetered: true,
+  };
+}
+
+function resolveGoogleModelHosted(model: GoogleModel): ResolvedModel {
+  const apiKey = env.GOOGLE_API_KEY;
+  if (!apiKey) {
+    throw new HostedProviderNotConfiguredError("google");
+  }
+  const google = createGoogleGenerativeAI({ apiKey });
+  return {
+    model: google(model.upstreamModelId),
+    provider: "google",
+    modelId: model.id,
+    isMetered: true,
   };
 }
 
@@ -182,6 +250,27 @@ function resolveDarkcodeModel(modelId: DarkcodeModelId): ResolvedModel {
   };
 }
 
+// ── Hosted key lookup ──────────────────────────────────────────────────────
+
+function getHostedKeyForProvider(provider: ByokProvider): string | undefined {
+  switch (provider) {
+    case "anthropic":
+      return env.ANTHROPIC_API_KEY;
+    case "openai":
+      return env.OPENAI_API_KEY;
+    case "deepseek":
+      return env.DEEPSEEK_API_KEY;
+    case "google":
+      return env.GOOGLE_API_KEY;
+    case "ollama":
+      return undefined; // Ollama never needs a key
+    default:
+      return undefined;
+  }
+}
+
+// ── Resolution orchestration ───────────────────────────────────────────────
+
 export type ProviderApiKeys = Partial<Record<ByokProvider, string>>;
 
 function resolveSupportedChatModel(
@@ -193,37 +282,60 @@ function resolveSupportedChatModel(
   switch (provider) {
     case "darkcode":
       return resolveDarkcodeModel(model.id);
+
     case "anthropic": {
-      const apiKey = apiKeys.anthropic;
-      if (!apiKey) {
-        throw new ApiKeyRequiredError("anthropic");
+      // Prefer BYOK if the user provided a key, otherwise fall back to hosted.
+      const byokKey = apiKeys.anthropic;
+      if (byokKey) {
+        return resolveAnthropicModelByok(model.id, byokKey);
       }
-      return resolveAnthropicModel(model.id, apiKey);
+      if (model.canBeHosted) {
+        return resolveAnthropicModelHosted(model.id);
+      }
+      throw new ApiKeyRequiredError("anthropic");
     }
+
     case "openai": {
-      const apiKey = apiKeys.openai;
-      if (!apiKey) {
-        throw new ApiKeyRequiredError("openai");
+      const byokKey = apiKeys.openai;
+      if (byokKey) {
+        return resolveOpenAIModelByok(model.id, byokKey);
       }
-      return resolveOpenAIModel(model.id, apiKey);
+      if (model.canBeHosted) {
+        return resolveOpenAIModelHosted(model.id);
+      }
+      throw new ApiKeyRequiredError("openai");
     }
+
     case "openai-compatible": {
-      const apiKey = apiKeys[model.byokProvider];
-      if (!apiKey) {
-        throw new ApiKeyRequiredError(model.byokProvider);
+      // Capture the discriminant before the `canBeHosted` check: every current
+      // openai-compatible entry is hosted-capable (literal `true`), so TS
+      // narrows the throw branch to `never` and would reject `model.byokProvider`.
+      const byokProvider = model.byokProvider;
+      const byokKey = apiKeys[byokProvider];
+      if (byokKey) {
+        return resolveOpenAICompatibleModelByok(model, byokKey);
       }
-      return resolveOpenAICompatibleModel(model, apiKey);
+      if (model.canBeHosted) {
+        return resolveOpenAICompatibleModelHosted(model);
+      }
+      throw new ApiKeyRequiredError(byokProvider);
     }
+
     case "google": {
-      const apiKey = apiKeys.google;
-      if (!apiKey) {
-        throw new ApiKeyRequiredError("google");
+      const byokKey = apiKeys.google;
+      if (byokKey) {
+        return resolveGoogleModelByok(model, byokKey);
       }
-      return resolveGoogleModel(model, apiKey);
+      if (model.canBeHosted) {
+        return resolveGoogleModelHosted(model);
+      }
+      throw new ApiKeyRequiredError("google");
     }
+
     case "ollama":
       // Ollama is local-only and requires no key.
       return resolveOllamaModel(model);
+
     default:
       return assertUnsupportedProvider(provider);
   }
@@ -233,6 +345,13 @@ export class ApiKeyRequiredError extends Error {
   constructor(public readonly provider: ByokProvider) {
     super(`Missing API key for provider: ${provider}`);
     this.name = "ApiKeyRequiredError";
+  }
+}
+
+export class HostedProviderNotConfiguredError extends Error {
+  constructor(public readonly provider: ByokProvider) {
+    super(`Hosted provider not configured: ${provider}. Add your own API key via /keys or contact support.`);
+    this.name = "HostedProviderNotConfiguredError";
   }
 }
 

@@ -1,7 +1,43 @@
 import open from "open";
+import { API_URL } from "./config";
 import { saveAuth } from "./auth";
 
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+
+type OAuthConfig = {
+  clerkFrontendApi: string;
+  clientId: string;
+};
+
+/**
+ * Resolve the public Clerk OAuth params the PKCE flow needs. The distributed
+ * binary bakes in only the API URL, so these are fetched from the server's
+ * `GET /auth/config`. An explicit `CLERK_*` env pair takes precedence so local
+ * dev can target a different Clerk instance without a running config endpoint.
+ */
+async function loadOAuthConfig(): Promise<OAuthConfig> {
+  const envFrontendApi = process.env.CLERK_FRONTEND_API;
+  const envClientId = process.env.CLERK_OAUTH_CLIENT_ID;
+  if (envFrontendApi && envClientId) {
+    return { clerkFrontendApi: envFrontendApi, clientId: envClientId };
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/auth/config`);
+  } catch {
+    throw new Error(`Could not reach the DarkCode API at ${API_URL}. Check your connection and try again.`);
+  }
+  if (!res.ok) {
+    throw new Error(`Failed to load sign-in config from ${API_URL} (HTTP ${res.status}).`);
+  }
+
+  const data = (await res.json()) as Partial<OAuthConfig>;
+  if (!data.clerkFrontendApi || !data.clientId) {
+    throw new Error("Sign-in config from the server is incomplete. The API may be misconfigured.");
+  }
+  return { clerkFrontendApi: data.clerkFrontendApi, clientId: data.clientId };
+}
 
 type OAuthState = {
   nonce: string;
@@ -35,12 +71,8 @@ function getErrorMessage(error: unknown) {
 }
 
 export async function performLogin() {
-  const clerkFrontendApi = process.env.CLERK_FRONTEND_API;
-  const clientId = process.env.CLERK_OAUTH_CLIENT_ID;
-  const apiUrl = process.env.API_URL ?? "http://localhost:3000";
-
-  if (!clerkFrontendApi) throw new Error("CLERK_FRONTEND_API not set");
-  if (!clientId) throw new Error("CLERK_OAUTH_CLIENT_ID not set");
+  const apiUrl = API_URL;
+  const { clerkFrontendApi, clientId } = await loadOAuthConfig();
 
   const nonce = crypto.randomUUID();
   const codeVerifier = toBase64Url(crypto.getRandomValues(new Uint8Array(32)));

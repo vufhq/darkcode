@@ -19,6 +19,10 @@ export type CompactionInput = {
   // model; a follow-up can route this to a cheaper summarizer.
   summarizerModel: LanguageModel;
   recentMessages?: number;
+  // Aborts the summarizer call when the request is cancelled or the turn's
+  // timeout budget is exhausted. Optional so non-request callers (e.g. tests)
+  // can omit it.
+  abortSignal?: AbortSignal;
 };
 
 export type CompactionResult = {
@@ -90,6 +94,7 @@ export async function compactWorkingContext(
     previousSummary,
     summarizerModel,
     recentMessages = DEFAULT_RECENT_MESSAGES,
+    abortSignal,
   } = input;
 
   if (rawWorkingMessages.length <= recentMessages) {
@@ -140,6 +145,7 @@ export async function compactWorkingContext(
     model: summarizerModel,
     system: SUMMARIZER_INSTRUCTIONS,
     prompt: `${priorSection}Conversation to summarize:\n\n${renderedHistory}`,
+    abortSignal,
   });
 
   return {

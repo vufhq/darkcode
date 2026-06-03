@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Newer pushes to the same ref cancel in-flight runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only needs to read the repo.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The server imports `@darkcode/database/client`, which re-exports the
+      # generated Prisma client. `tsc` can't resolve it until it is generated.
+      # (The server's postinstall also runs this; kept explicit so the step is
+      # self-evident and independent of install ordering.)
+      - name: Generate Prisma client
+        run: bun run --cwd packages/database db:generate
+
+      - name: Run tests
+        run: bun test
+
+      # Strict typecheck for both packages. The ONLY tolerated errors are the
+      # two documented Polar-SDK type-drift lines in server/src/lib/polar.ts
+      # (see CLAUDE.md). Anything else fails the build.
+      - name: Typecheck
+        run: |
+          set +e
+          output=$( { \
+            bunx tsc --noEmit --pretty false -p packages/server/tsconfig.json; \
+            bunx tsc --noEmit --pretty false -p packages/cli/tsconfig.json; \
+          } 2>&1 )
+          echo "$output"
+          unexpected=$(printf '%s\n' "$output" | grep -E 'error TS' | grep -v 'src/lib/polar.ts')
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected TypeScript errors (only src/lib/polar.ts SDK drift is tolerated):"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+          echo "Typecheck OK — only the known src/lib/polar.ts SDK drift remains."
+
+  migrations:
+    name: Prisma migrations match schema
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: darkcode
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Consumed by packages/database/prisma.config.ts via env("DATABASE_URL").
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/darkcode
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: bun run --cwd packages/database db:generate
+
+      # Exactly what the Dockerfile runs on boot. Applies 0_init →
+      # 1_audit_log → 2_phase3_session_compaction to a clean database; fails
+      # if any migration is malformed or can't build a fresh DB.
+      - name: Apply migrations to a fresh database
+        working-directory: packages/database
+        run: bunx prisma migrate deploy
+
+      # Regression guard for the drift class that shipped a broken deploy:
+      # introspect the freshly-migrated DB and assert it fully describes
+      # schema.prisma. Empty diff → exit 0; any difference → exit 2 → fail.
+      - name: Assert migrations fully describe schema.prisma
+        working-directory: packages/database
+        run: |
+          if bunx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code; then
+            echo "Migrations are in sync with schema.prisma."
+          else
+            echo "::error::Prisma migrations are out of sync with schema.prisma. A column/table exists in the schema but no migration creates it. Run 'bun run --cwd packages/database db:migrate' and commit the generated migration."
+            exit 1
+          fi
