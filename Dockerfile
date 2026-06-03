@@ -38,9 +38,15 @@ WORKDIR /app
 ENV NODE_ENV=production \
     PORT=3000
 
-# Copy installed deps + generated prisma client from the deps stage.
+# Copy installed deps + the generated prisma client from the deps stage.
+# packages/database comes from deps because that's where `prisma generate` wrote
+# the client (generated/) — but the deps stage only had the manifest + schema,
+# never the package's TS source. src/client.ts (exported as
+# @darkcode/database/client) and src/index.ts therefore aren't in the deps copy,
+# so bring them in from the build context.
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/packages/database ./packages/database
+COPY packages/database/src ./packages/database/src
 
 # Application source. The CLI package isn't needed at runtime but its
 # package.json is referenced by the workspace resolver — keep it minimal
