@@ -130,7 +130,10 @@ export async function listUsageEvents(
     name: "darkcode_usage",
     limit: Math.max(1, Math.min(100, limit)),
   });
-  const items = page.result.items;
+  // `events.list` returns the raw `ListResourceEvent` ({ items, pagination }),
+  // unlike `subscriptions.list`/`orders.list` which return a paginated wrapper
+  // exposing `.result`. Reading `.result.items` here threw at runtime (500).
+  const items = page.items;
   return items.map((event) => {
     const credits = Number((event.metadata as { credits?: unknown }).credits ?? 0);
     return {
