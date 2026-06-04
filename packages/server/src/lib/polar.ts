@@ -15,6 +15,38 @@ function hasStatusCode(error: unknown): error is { statusCode: number } {
   );
 }
 
+// Boot-time sanity check for POLAR_CREDITS_METER_ID. A wrong/stale meter id
+// makes `getAvailableCreditsBalance` find no matching active meter and silently
+// fall through to `?? 0`, so EVERY hosted turn is refused with "no credits"
+// even when the customer has been credited — an invisible, account-wide outage.
+// We probe the meter once at startup so a misconfig surfaces as a loud log (and
+// a hard crash in production) instead of looking like "everyone is broke".
+export type CreditsMeterCheck =
+  | { ok: true; name: string }
+  | { ok: false; reason: "not_found" | "unreachable"; message: string };
+
+export async function verifyCreditsMeterConfigured(): Promise<CreditsMeterCheck> {
+  try {
+    const meter = await polar.meters.get({ id: env.POLAR_CREDITS_METER_ID });
+    return { ok: true, name: meter.name };
+  } catch (error) {
+    if (hasStatusCode(error) && error.statusCode === 404) {
+      return {
+        ok: false,
+        reason: "not_found",
+        message: `Polar meter ${env.POLAR_CREDITS_METER_ID} does not exist on this token/environment`,
+      };
+    }
+    // Network/transient error — don't conflate "Polar is down right now" with
+    // "the meter id is wrong". Caller treats this as a warning, not a crash.
+    return {
+      ok: false,
+      reason: "unreachable",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 type CreateCheckoutUrlParams = {
   customerExternalId: string;
 };

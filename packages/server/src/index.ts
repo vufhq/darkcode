@@ -8,6 +8,7 @@ import { initSentry, captureException, Sentry } from "./lib/sentry";
 import { logger } from "./lib/logger";
 import { clip, safeErrorMessage } from "./lib/safe-error";
 import { startPolarOutboxSweeper, stopPolarOutboxSweeper } from "./lib/polar-outbox";
+import { verifyCreditsMeterConfigured } from "./lib/polar";
 import { closeRedis } from "./lib/redis";
 import { db } from "@darkcode/database/client";
 import { requestContext, type RequestContextEnv } from "./middleware/request-context";
@@ -164,6 +165,32 @@ if (isProduction) {
     logger.warn("production.sentry_missing — unhandled errors will not be captured");
   }
 }
+
+// Verify POLAR_CREDITS_METER_ID actually resolves to a real meter on this
+// Polar token/environment. A wrong/stale id makes every credit-balance read
+// silently return 0 → every hosted turn is refused with "no credits" even for
+// fully-credited users, with nothing in the logs to explain it. Probe once at
+// boot: crash hard in production (a crashloop with a clear fatal log beats a
+// silent account-wide outage), warn loudly in dev. A transient Polar outage
+// (`unreachable`) only warns — we don't refuse to boot over a blip.
+void verifyCreditsMeterConfigured().then((result) => {
+  if (result.ok) {
+    logger.info({ meter: result.name }, "polar.credits_meter_ok");
+    return;
+  }
+  if (result.reason === "not_found") {
+    logger.fatal(
+      { meterId: env.POLAR_CREDITS_METER_ID, err: result.message },
+      "polar.credits_meter_missing — POLAR_CREDITS_METER_ID does not exist on this token/environment; ALL credit balances read 0 and every hosted turn is refused. Fix the env var.",
+    );
+    if (isProduction) process.exit(1);
+  } else {
+    logger.warn(
+      { meterId: env.POLAR_CREDITS_METER_ID, err: result.message },
+      "polar.credits_meter_unverified — could not reach Polar to verify the credits meter; booting anyway",
+    );
+  }
+});
 
 // ---------- graceful shutdown ----------
 const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS ?? "30000");
