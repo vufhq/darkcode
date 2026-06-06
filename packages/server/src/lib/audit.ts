@@ -9,6 +9,7 @@ export type AuditAction =
   | "session.compact"
   | "billing.checkout"
   | "billing.portal"
+  | "billing.free_tier_granted"
   | "credits.depleted";
 
 type AuditEvent = {

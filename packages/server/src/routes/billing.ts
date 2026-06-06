@@ -3,16 +3,26 @@ import type { AuthenticatedEnv } from "../middleware/require-auth";
 import {
   createCheckoutUrl,
   createCustomerPortalUrl,
+  ensureFreeTierGrant,
   getAvailableCreditsBalance,
   getSubscription,
   listTransactions,
   listUsageEvents,
 } from "../lib/polar";
 import { logAuditEvent } from "../lib/audit";
+import { claimIdempotencyKey } from "../lib/idempotency";
+import { getUserPrimaryEmail } from "../lib/auth";
+import { logger } from "../lib/logger";
+import { env } from "../lib/env";
 
 const app = new Hono<AuthenticatedEnv>()
   .get("/balance", async (c) => {
     const userId = c.get("userId");
+    // Lazily grant the free recurring credit tier the first time we see an
+    // authenticated user (there is no Clerk signup webhook). Fire-and-forget so
+    // it never blocks or fails the balance read; throttled by an idempotency
+    // claim and independently idempotent in Polar.
+    void maybeGrantFreeTier(userId, c.get("requestId"));
     const credits = await getAvailableCreditsBalance(userId);
     return c.json({ credits, asOf: new Date().toISOString() });
   })
@@ -45,5 +55,30 @@ const app = new Hono<AuthenticatedEnv>()
     return c.json({ url });
   })
   .get("/success", (c) => c.text("Done. You can close this tab and return to Darkcode."));
+
+// Best-effort, fire-and-forget free-tier grant. The idempotency claim ensures
+// at most one attempt per TTL window per user (so we don't call Polar on every
+// balance poll); `ensureFreeTierGrant` is also idempotent against Polar, and a
+// no-op when POLAR_FREE_GRANT_PRODUCT_ID is unset. Never throws to the caller.
+async function maybeGrantFreeTier(userId: string, requestId: string | undefined): Promise<void> {
+  try {
+    // Disabled until provisioned: bail before any claim or Clerk call so the
+    // feature is a true no-op when POLAR_FREE_GRANT_PRODUCT_ID is unset.
+    if (!env.POLAR_FREE_GRANT_PRODUCT_ID) return;
+    if (!(await claimIdempotencyKey("free-tier-grant", userId, "v1"))) return;
+    const email = await getUserPrimaryEmail(userId);
+    if (!email) {
+      logger.warn({ userId }, "free_tier.skip_no_email");
+      return;
+    }
+    const result = await ensureFreeTierGrant({ externalCustomerId: userId, email });
+    if (result === "granted") {
+      logger.info({ userId }, "free_tier.granted");
+      void logAuditEvent({ userId, action: "billing.free_tier_granted", requestId });
+    }
+  } catch (error) {
+    logger.warn({ err: error, userId }, "free_tier.grant_failed");
+  }
+}
 
 export default app;

@@ -10,6 +10,7 @@ import {
   setPermissionPosture,
   type PermissionPosture,
 } from "../../lib/permissions/engine";
+import type { CreditsState } from "../../lib/credits";
 
 export type ContextUsage = {
   estimatedTokens: number;
@@ -24,6 +25,11 @@ type PromptConfigContextValue = {
   setModel: (model: SupportedChatModelId) => void;
   contextUsage: ContextUsage | null;
   setContextUsage: (usage: ContextUsage | null) => void;
+  // Last-known DarkCode credit balance for the status-bar gauge. `null` until
+  // first fetched; an explicit "unavailable" CreditsState when the balance
+  // couldn't be loaded (never silently 0).
+  credits: CreditsState | null;
+  setCredits: (credits: CreditsState | null) => void;
   posture: PermissionPosture;
   setPosture: (posture: PermissionPosture) => void;
 };
@@ -46,6 +52,7 @@ export function PromptConfigProvider({ children }: PromptConfigProviderProps) {
   const [mode, setMode] = useState<ModeType>(Mode.BUILD);
   const [model, setModel] = useState<SupportedChatModelId>(DEFAULT_CHAT_MODEL_ID);
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
+  const [credits, setCredits] = useState<CreditsState | null>(null);
   const [posture, setPostureState] = useState<PermissionPosture>("normal");
 
   const toggleMode = useCallback(() => {
@@ -73,6 +80,8 @@ export function PromptConfigProvider({ children }: PromptConfigProviderProps) {
         setModel,
         contextUsage,
         setContextUsage,
+        credits,
+        setCredits,
         posture,
         setPosture,
     }}>

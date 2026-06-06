@@ -45,6 +45,10 @@ const schema = z.object({
   POLAR_PRODUCT_ID: NonEmpty,
   POLAR_SERVER: z.enum(["sandbox", "production"]).default("sandbox"),
   POLAR_CREDITS_METER_ID: NonEmpty,
+  // Free recurring credit tier (Item 3): the $0 recurring product carrying the
+  // meter_credit benefit, created by `bun run provision:free-tier`. Unset = the
+  // free tier is disabled and `ensureFreeTierGrant` is a no-op.
+  POLAR_FREE_GRANT_PRODUCT_ID: Optional,
 
   // Public URL of the website (no trailing slash). Used as the Polar
   // checkout success/return URL so users land back on /dashboard/billing

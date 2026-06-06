@@ -4,9 +4,13 @@ import { useTheme } from "../../providers/theme";
 
 type Props = {
   message: string;
+  // Optional call-to-action rendered below the message in an accent color (not
+  // dim), so an actionable, recoverable error (e.g. out of credits) reads as a
+  // next step rather than a crash.
+  hint?: string;
 };
 
-export function ErrorMessage({ message }: Props) {
+export function ErrorMessage({ message, hint }: Props) {
   const { colors } = useTheme();
 
   return (
@@ -22,13 +26,15 @@ export function ErrorMessage({ message }: Props) {
         }}
       >
         <box
-          justifyContent="center"
+          flexDirection="column"
           paddingX={2}
           paddingY={1}
+          gap={hint ? 1 : 0}
           backgroundColor={colors.surface}
           width="100%"
         >
           <text attributes={TextAttributes.DIM}>{message}</text>
+          {hint ? <text fg={colors.primary}>{hint}</text> : null}
         </box>
       </box>
     </box>

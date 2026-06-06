@@ -44,6 +44,34 @@ describe("credit-depleted fallback decision", () => {
   });
 });
 
+// chat.ts reads the Polar balance behind a try/catch: a confirmed balance is a
+// number, but a transient fetch failure (Polar down / network) is mapped to
+// `null` and the turn proceeds (fail open) rather than 503'ing — hard-blocking
+// a paying user because the billing system glitched is the "you look broke"
+// churn moment we refuse to create. Only a CONFIRMED non-positive balance
+// gates. `gatesForDepletion` mirrors that inline predicate (chat.ts ~L255).
+function gatesForDepletion(creditsBalance: number | null): boolean {
+  return creditsBalance !== null && creditsBalance <= 0;
+}
+
+describe("credit gate fails open on an unreadable balance", () => {
+  test("a confirmed zero balance gates the turn", () => {
+    expect(gatesForDepletion(0)).toBe(true);
+  });
+
+  test("a confirmed negative balance gates the turn", () => {
+    expect(gatesForDepletion(-5)).toBe(true);
+  });
+
+  test("a positive balance does not gate", () => {
+    expect(gatesForDepletion(120)).toBe(false);
+  });
+
+  test("an unreadable balance (null) fails open — never gated as if broke", () => {
+    expect(gatesForDepletion(null)).toBe(false);
+  });
+});
+
 describe("hosted fallback wiring (the exact chain chat.ts walks)", () => {
   test("darkcode-ai falls back to claude-haiku-4-5", () => {
     expect(getModelFallbackId("darkcode-ai")).toBe("claude-haiku-4-5");
