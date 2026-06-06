@@ -25,3 +25,14 @@ export async function authenticateOAuthRequest(request: Request) {
 
   return { userId: auth.userId };
 }
+
+// Look up a Clerk user's primary email. Needed to create their Polar customer
+// for the free-tier grant (free users never hit checkout, which is what
+// otherwise captures an email). Returns null if the user has no email on file.
+export async function getUserPrimaryEmail(userId: string): Promise<string | null> {
+  const user = await clerkClient.users.getUser(userId);
+  const primary =
+    user.emailAddresses.find((e) => e.id === user.primaryEmailAddressId) ??
+    user.emailAddresses[0];
+  return primary?.emailAddress ?? null;
+}

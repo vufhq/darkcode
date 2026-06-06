@@ -8,7 +8,9 @@
     "build:cli": "bun run --filter @darkcode/cli build",
     "link:cli": "bun run build:cli && cd packages/cli && bun link",
     "test": "bun test",
-    "diagnose:credits": "bun run scripts/diagnose-credits.ts"
+    "diagnose:credits": "bun run scripts/diagnose-credits.ts",
+    "spike:grant": "bun run scripts/grant-mechanism-spike.ts",
+    "provision:free-tier": "bun run scripts/provision-free-tier.ts"
   },
   "dependencies": {
     "dotenv": "^17.4.2"

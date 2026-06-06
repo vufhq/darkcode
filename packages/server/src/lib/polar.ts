@@ -229,3 +229,45 @@ export async function ingestAiUsage({
     ],
   });
 };
+
+export type FreeTierGrantResult = "disabled" | "already_granted" | "granted";
+
+// Idempotently subscribe a customer to the free recurring credit tier (Item 3).
+// Credits arrive as a `meter_credit` benefit on POLAR_CREDITS_METER_ID and
+// refresh each cycle (the benefit is created `rollover:false` by
+// scripts/provision-free-tier.ts). Idempotency is sourced from Polar itself:
+// we skip if the customer already has a subscription to the free product, so
+// callers can fire this freely. `subscriptions.create` requires the customer to
+// exist, and free users never go through checkout (which is what otherwise
+// lazily creates them), so we ensure the customer first.
+export async function ensureFreeTierGrant({
+  externalCustomerId,
+  email,
+}: {
+  externalCustomerId: string;
+  email: string;
+}): Promise<FreeTierGrantResult> {
+  const productId = env.POLAR_FREE_GRANT_PRODUCT_ID;
+  if (!productId) return "disabled";
+
+  const existing = await polar.subscriptions.list({
+    externalCustomerId,
+    limit: 100,
+  });
+  if (existing.result.items.some((sub) => sub.productId === productId)) {
+    return "already_granted";
+  }
+
+  try {
+    await polar.customers.getExternal({ externalId: externalCustomerId });
+  } catch (error) {
+    if (hasStatusCode(error) && error.statusCode === 404) {
+      await polar.customers.create({ email, externalId: externalCustomerId });
+    } else {
+      throw error;
+    }
+  }
+
+  await polar.subscriptions.create({ productId, externalCustomerId });
+  return "granted";
+};
