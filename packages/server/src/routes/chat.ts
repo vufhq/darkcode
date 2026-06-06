@@ -234,16 +234,28 @@ const app = new Hono<AuthenticatedEnv>()
       // model's registered fallback IF the user has that provider's BYOK key
       // (so the fallback turn is unmetered); otherwise we refuse with 402.
       if (resolvedModel.isMetered) {
-        let creditsBalance: number;
+        let creditsBalance: number | null;
         try {
           creditsBalance = await getAvailableCreditsBalance(userId);
         } catch (error) {
-          log.error({ err: error }, "credits_balance_unavailable");
+          // Fail OPEN on a transient balance-fetch failure (Polar down / network).
+          // Hard-blocking a paying user mid-turn because the billing system had a
+          // glitch is the exact "you look broke" churn moment we refuse to create.
+          // The turn still proceeds and is metered in onFinish (the usage ingest
+          // self-queues to the outbox on failure), so the only exposure is a
+          // genuinely-depleted user sneaking a single turn during an outage.
+          // Logged at warn + captured so the outage still pages us.
+          log.warn(
+            { err: error, userId, requestId },
+            "credits_balance_unavailable_fail_open",
+          );
           captureException(error, { userId, requestId, tags: { kind: "polar_balance" } });
-          return c.json({ error: "Unable to verify credits balance right now." }, 503);
+          creditsBalance = null;
         }
 
-        if (creditsBalance <= 0) {
+        // `null` == couldn't read the balance; we deliberately don't treat that
+        // as depleted (fail open). Only a confirmed non-positive balance gates.
+        if (creditsBalance !== null && creditsBalance <= 0) {
           const fallbackId = getModelFallbackId(effectiveModelId);
           const fallbackDef = fallbackId ? findSupportedChatModel(fallbackId) : null;
           const fallbackKeyAvailable =
@@ -262,8 +274,14 @@ const app = new Hono<AuthenticatedEnv>()
             resolvedModel = resolveChatModel(effectiveModelId, apiKeys);
           } else {
             void logAuditEvent({ userId, action: "credits.depleted", requestId });
+            // `code` is a stable, machine-readable signal so the CLI can render
+            // an actionable top-up affordance instead of string-matching the
+            // human message (which we're free to reword). See http-errors.ts.
             return c.json(
-              { error: "No credits remaining. Run /upgrade to buy more credits." },
+              {
+                error: "No credits remaining. Run /upgrade to buy more credits.",
+                code: "credits_depleted",
+              },
               402,
             );
           }

@@ -2,7 +2,11 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { useParams, useLocation, useNavigate } from "react-router";
 import { z } from "zod";
 import { useKeyboard } from "@opentui/react";
-import { type ModeType, type SupportedChatModelId } from "@darkcode/shared";
+import {
+  findSupportedChatModel,
+  type ModeType,
+  type SupportedChatModelId,
+} from "@darkcode/shared";
 import type { InferResponseType } from "hono/client";
 import { SessionShell } from "../components/session-shell";
 import {
@@ -16,8 +20,15 @@ import { useChat } from "../hooks/use-chat";
 import { usePromptConfig } from "../providers/prompt-config";
 import type { Message } from "../hooks/use-chat";
 import { apiClient } from "../lib/api-client";
-import { getErrorMessage, formatChatErrorMessage } from "../lib/http-errors";
+import { getErrorMessage, parseChatError } from "../lib/http-errors";
+import { fetchCreditsBalance } from "../lib/credits";
 import { useKeyboardLayer } from "../providers/keyboard-layer";
+
+// Reassuring, actionable CTA shown when a metered turn is refused for low
+// credits. The conversation is already persisted server-side, so we tell the
+// user that plainly and point at the one-command top-up.
+const CREDITS_DEPLETED_HINT =
+  "Your conversation is saved — run /upgrade to add credits and continue.";
 
 type SessionData = InferResponseType<(typeof apiClient.sessions)[":id"]["$get"], 200>;
 
@@ -73,7 +84,7 @@ function SessionChat({
   initialPrompt?: { message: string; mode: ModeType; model: SupportedChatModelId };
 }) {
   const [initialMessages] = useState(() => session.messages as unknown as Message[]);
-  const { mode, model, setContextUsage } = usePromptConfig();
+  const { mode, model, setContextUsage, setCredits } = usePromptConfig();
   const { isTopLayer } = useKeyboardLayer();
   const { messages, status, submit, abort, interrupt, error } = useChat(
     session.id,
@@ -81,13 +92,35 @@ function SessionChat({
   );
   const hasSubmittedInitialPromptRef = useRef(false);
 
-  // Stop the pending reply when the user leaves this session.
+  // Only the hosted DarkCode model spends credits — BYOK turns bill against the
+  // user's own provider account. So the gauge (and its refresh) is scoped to the
+  // hosted model; switching models mid-session flips it on/off naturally.
+  const isHostedModel = findSupportedChatModel(model)?.provider === "darkcode";
+
+  // Stop the pending reply when the user leaves this session, and clear the
+  // status-bar gauges so a stale balance/usage doesn't bleed into the next view.
   useEffect(() => {
     return () => {
       void abort();
       setContextUsage(null);
+      setCredits(null);
     };
-  }, [abort, setContextUsage]);
+  }, [abort, setContextUsage, setCredits]);
+
+  // Load the credit balance on entry and refresh it whenever a turn settles on
+  // the hosted model (the only path that spends credits). Polar is eventually
+  // consistent, so this is a "last known balance" indicator, not a live meter.
+  useEffect(() => {
+    if (!isHostedModel) return;
+    if (status !== "ready") return;
+    let ignore = false;
+    void fetchCreditsBalance().then((next) => {
+      if (!ignore) setCredits(next);
+    });
+    return () => {
+      ignore = true;
+    };
+  }, [isHostedModel, status, setCredits]);
 
   // Surface the latest turn's context usage into the status bar.
   useEffect(() => {
@@ -128,7 +161,15 @@ function SessionChat({
       {messages.map((msg) => (
         <ChatMessage key={msg.id} msg={msg} />
       ))}
-      {error && <ErrorMessage message={formatChatErrorMessage(error.message)} />}
+      {error && (() => {
+        const parsed = parseChatError(error.message);
+        return (
+          <ErrorMessage
+            message={parsed.message}
+            hint={parsed.code === "credits_depleted" ? CREDITS_DEPLETED_HINT : undefined}
+          />
+        );
+      })()}
     </SessionShell>
   );
 }
