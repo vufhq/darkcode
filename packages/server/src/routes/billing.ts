@@ -14,6 +14,8 @@ import { claimIdempotencyKey } from "../lib/idempotency";
 import { getUserPrimaryEmail } from "../lib/auth";
 import { logger } from "../lib/logger";
 import { env } from "../lib/env";
+import { clientIp } from "../middleware/rate-limit";
+import { freeGrantIpLimitReached, recordFreeGrantForIp } from "../lib/free-grant-guard";
 
 const app = new Hono<AuthenticatedEnv>()
   .get("/balance", async (c) => {
@@ -21,8 +23,8 @@ const app = new Hono<AuthenticatedEnv>()
     // Lazily grant the free recurring credit tier the first time we see an
     // authenticated user (there is no Clerk signup webhook). Fire-and-forget so
     // it never blocks or fails the balance read; throttled by an idempotency
-    // claim and independently idempotent in Polar.
-    void maybeGrantFreeTier(userId, c.get("requestId"));
+    // claim, independently idempotent in Polar, and rate-capped per source IP.
+    void maybeGrantFreeTier(userId, clientIp(c), c.get("requestId"));
     const credits = await getAvailableCreditsBalance(userId);
     return c.json({ credits, asOf: new Date().toISOString() });
   })
@@ -78,12 +80,26 @@ const app = new Hono<AuthenticatedEnv>()
 // at most one attempt per TTL window per user (so we don't call Polar on every
 // balance poll); `ensureFreeTierGrant` is also idempotent against Polar, and a
 // no-op when POLAR_FREE_GRANT_PRODUCT_ID is unset. Never throws to the caller.
-async function maybeGrantFreeTier(userId: string, requestId: string | undefined): Promise<void> {
+async function maybeGrantFreeTier(
+  userId: string,
+  ip: string,
+  requestId: string | undefined,
+): Promise<void> {
   try {
     // Disabled until provisioned: bail before any claim or Clerk call so the
     // feature is a true no-op when POLAR_FREE_GRANT_PRODUCT_ID is unset.
     if (!env.POLAR_FREE_GRANT_PRODUCT_ID) return;
     if (!(await claimIdempotencyKey("free-tier-grant", userId, "v1"))) return;
+    // Per-IP velocity guard (Tier 3 abuse): blunt scripted multi-signup farming.
+    // Checked AFTER the per-user claim (so it isn't hit on every balance poll)
+    // and BEFORE issuing the grant. Returning users resolve to "already_granted"
+    // below and never call recordFreeGrantForIp, so a shared NAT/CGNAT IP isn't
+    // penalised for legitimate repeat traffic. Fails open.
+    if (await freeGrantIpLimitReached(ip)) {
+      logger.warn({ userId, ip }, "free_tier.ip_velocity_blocked");
+      void logAuditEvent({ userId, action: "billing.free_tier_blocked", requestId });
+      return;
+    }
     const email = await getUserPrimaryEmail(userId);
     if (!email) {
       logger.warn({ userId }, "free_tier.skip_no_email");
@@ -91,6 +107,9 @@ async function maybeGrantFreeTier(userId: string, requestId: string | undefined)
     }
     const result = await ensureFreeTierGrant({ externalCustomerId: userId, email });
     if (result === "granted") {
+      // Count only grants that actually landed, so the per-IP window tracks real
+      // new identities rather than every poll.
+      await recordFreeGrantForIp(ip);
       logger.info({ userId }, "free_tier.granted");
       void logAuditEvent({ userId, action: "billing.free_tier_granted", requestId });
     }

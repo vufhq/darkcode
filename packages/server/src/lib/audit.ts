@@ -11,6 +11,7 @@ export type AuditAction =
   | "billing.checkout_pro"
   | "billing.portal"
   | "billing.free_tier_granted"
+  | "billing.free_tier_blocked"
   | "credits.depleted"
   | "pro.required";
 

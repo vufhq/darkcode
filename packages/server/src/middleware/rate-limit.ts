@@ -11,7 +11,7 @@ type RateLimitOptions = RateLimitConfig & {
   keyResolver?: KeyResolver;
 };
 
-function clientIp(c: Context) {
+export function clientIp(c: Context) {
   const forwarded = c.req.header("x-forwarded-for");
   if (forwarded) {
     const first = forwarded.split(",")[0]?.trim();
