@@ -95,7 +95,8 @@ try {
 
   const benefit = await polar.benefits.create({
     type: "meter_credit",
-    description: `DarkCode free tier — ${FREE_TIER_CREDITS} credits / ${RECURRING_INTERVAL}`,
+    // Polar caps the benefit description at 42 chars — keep this template short.
+    description: `DarkCode free: ${FREE_TIER_CREDITS} credits/${RECURRING_INTERVAL}`,
     metadata: { darkcode_role: MARKER },
     properties: { units: FREE_TIER_CREDITS, rollover: false, meterId },
     ...orgField,
