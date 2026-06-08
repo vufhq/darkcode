@@ -30,6 +30,11 @@ import { useKeyboardLayer } from "../providers/keyboard-layer";
 const CREDITS_DEPLETED_HINT =
   "Your conversation is saved — run /upgrade to add credits and continue.";
 
+// Shown when a premium hosted model is refused for lack of a Pro subscription.
+// Points at both the subscribe path and the BYOK escape hatch.
+const PRO_REQUIRED_HINT =
+  "This model needs DarkCode Pro — run /pro to subscribe, add your own key with /keys, or pick another model with /models.";
+
 type SessionData = InferResponseType<(typeof apiClient.sessions)[":id"]["$get"], 200>;
 
 const sessionLocationSchema = z.object({
@@ -163,12 +168,13 @@ function SessionChat({
       ))}
       {error && (() => {
         const parsed = parseChatError(error.message);
-        return (
-          <ErrorMessage
-            message={parsed.message}
-            hint={parsed.code === "credits_depleted" ? CREDITS_DEPLETED_HINT : undefined}
-          />
-        );
+        const hint =
+          parsed.code === "credits_depleted"
+            ? CREDITS_DEPLETED_HINT
+            : parsed.code === "pro_required"
+              ? PRO_REQUIRED_HINT
+              : undefined;
+        return <ErrorMessage message={parsed.message} hint={hint} />;
       })()}
     </SessionShell>
   );

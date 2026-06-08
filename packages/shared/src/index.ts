@@ -12,6 +12,7 @@ export {
   modelCanBeHosted,
   getModelContextWindow,
   getModelFallbackId,
+  isProTierModel,
   type ModelPricing,
   type SupportedProvider,
   type SupportedChatModel,

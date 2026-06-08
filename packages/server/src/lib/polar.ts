@@ -49,6 +49,10 @@ export async function verifyCreditsMeterConfigured(): Promise<CreditsMeterCheck>
 
 type CreateCheckoutUrlParams = {
   customerExternalId: string;
+  // Which Polar product to check out. Defaults to the pay-as-you-go credit
+  // top-up product (POLAR_PRODUCT_ID); pass the Pro product id for the
+  // subscription checkout.
+  productId?: string;
 };
 
 // Polar redirects users here after checkout / from the customer portal. We
@@ -61,9 +65,10 @@ const websiteReturnUrl = new URL(
 
 export async function createCheckoutUrl({
   customerExternalId,
+  productId,
 }: CreateCheckoutUrlParams) {
   const result = await polar.checkouts.create({
-    products: [env.POLAR_PRODUCT_ID],
+    products: [productId ?? env.POLAR_PRODUCT_ID],
     successUrl: websiteReturnUrl,
     externalCustomerId: customerExternalId,
     metadata: { source: "darkcode-cli" },
@@ -152,24 +157,46 @@ export type SubscriptionOut =
       planName: string;
       renewsAt: string | null;
       cancelAtPeriodEnd?: boolean;
+      // True when this is the paid Pro subscription (productId === the
+      // configured POLAR_PRO_PRODUCT_ID). Drives the "Pro" badge on the
+      // website/CLI. Always false when Pro isn't provisioned.
+      isPro?: boolean;
     };
+
+function isActiveSubscriptionStatus(status: string): boolean {
+  return status === "active" || status === "trialing";
+}
 
 export async function getSubscription(
   externalCustomerId: string,
 ): Promise<SubscriptionOut> {
+  // A user can hold more than one subscription at once: the free-tier $0
+  // subscription (Item 3) AND a paid Pro subscription (Item 4). Pull a small
+  // page and pick the most relevant one rather than blindly taking the first,
+  // so a paying Pro user never displays as "Free Tier".
   const page = await polar.subscriptions.list({
     externalCustomerId,
-    limit: 1,
+    limit: 20,
   });
-  const sub = page.result.items[0];
-  if (!sub) return { status: "none" };
+  const items = page.result.items;
+  if (items.length === 0) return { status: "none" };
+
+  const proProductId = env.POLAR_PRO_PRODUCT_ID;
+  // Rank: prefer the paid Pro subscription, then any active subscription, so the
+  // surfaced plan reflects what the user is actually paying for.
+  const rank = (sub: (typeof items)[number]): number => {
+    const pro = proProductId != null && sub.productId === proProductId ? 2 : 0;
+    const active = isActiveSubscriptionStatus(sub.status) ? 1 : 0;
+    return pro + active;
+  };
+  const sub = [...items].sort((a, b) => rank(b) - rank(a))[0]!;
 
   // Polar returns its own status enum; collapse it into the three buckets
   // the website's discriminated union expects. Anything we can't classify
   // as active or past_due is surfaced as `canceled`, which still shows the
   // plan name + last-known renewal date.
   const status: "active" | "past_due" | "canceled" =
-    sub.status === "active" || sub.status === "trialing"
+    isActiveSubscriptionStatus(sub.status)
       ? "active"
       : sub.status === "past_due"
         ? "past_due"
@@ -181,7 +208,29 @@ export async function getSubscription(
     renewsAt:
       status === "canceled" ? null : sub.currentPeriodEnd.toISOString(),
     cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
+    isPro: proProductId != null && sub.productId === proProductId,
   };
+}
+
+// Does the customer have a currently-active (or trialing) subscription to the
+// Pro product? Used by the chat route to gate premium hosted models. Returns
+// false when Pro isn't provisioned (POLAR_PRO_PRODUCT_ID unset) so the gate is
+// inert by default. Throws on a Polar/network error — the caller decides how to
+// handle that (chat.ts fails open).
+export async function hasActiveProSubscription(
+  externalCustomerId: string,
+): Promise<boolean> {
+  const proProductId = env.POLAR_PRO_PRODUCT_ID;
+  if (!proProductId) return false;
+
+  const page = await polar.subscriptions.list({
+    externalCustomerId,
+    limit: 100,
+  });
+  return page.result.items.some(
+    (sub) =>
+      sub.productId === proProductId && isActiveSubscriptionStatus(sub.status),
+  );
 }
 
 export type TransactionOut = {

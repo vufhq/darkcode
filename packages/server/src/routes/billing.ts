@@ -48,6 +48,24 @@ const app = new Hono<AuthenticatedEnv>()
     void logAuditEvent({ userId, action: "billing.checkout", requestId: c.get("requestId") });
     return c.json({ url });
   })
+  .post("/checkout/pro", async (c) => {
+    const userId = c.get("userId");
+    // Pro is a paid recurring product and must go through Polar checkout. When
+    // it isn't provisioned for this environment there's nothing to subscribe to
+    // — say so explicitly rather than 500'ing on a missing product id.
+    if (!env.POLAR_PRO_PRODUCT_ID) {
+      return c.json(
+        { error: "Pro isn't available right now.", code: "pro_unavailable" },
+        503,
+      );
+    }
+    const url = await createCheckoutUrl({
+      customerExternalId: userId,
+      productId: env.POLAR_PRO_PRODUCT_ID,
+    });
+    void logAuditEvent({ userId, action: "billing.checkout_pro", requestId: c.get("requestId") });
+    return c.json({ url });
+  })
   .post("/portal", async (c) => {
     const userId = c.get("userId");
     const url = await createCustomerPortalUrl({ customerExternalId: userId });

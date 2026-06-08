@@ -74,6 +74,12 @@ type BaseModelDefinition = {
   // our API keys) and bill the user in credits. When false, the model can
   // only be used via BYOK or is free (e.g. Ollama).
   canBeHosted: boolean;
+  // Access tier for *hosted* (metered) use. Absent = available to everyone on
+  // credits / the free tier. "pro" = the premium hosted models, gated behind an
+  // active Pro subscription when run on our infra. BYOK is never gated by tier
+  // (the user's own key always works), and the gate is inert until Pro is
+  // provisioned server-side (POLAR_PRO_PRODUCT_ID). See `isProTierModel`.
+  tier?: "pro";
 };
 
 type DarkcodeModelDefinition = BaseModelDefinition & {
@@ -182,6 +188,7 @@ export const SUPPORTED_CHAT_MODELS = [
     displayName: "Claude Opus 4.6",
     requiresApiKey: true,
     canBeHosted: true,
+    tier: "pro",
     byokProvider: "anthropic",
     pricing: {
       inputUsdPerMillionTokens: 5,
@@ -196,6 +203,7 @@ export const SUPPORTED_CHAT_MODELS = [
     displayName: "GPT-5.4",
     requiresApiKey: true,
     canBeHosted: true,
+    tier: "pro",
     byokProvider: "openai",
     pricing: {
       inputUsdPerMillionTokens: 2.5,
@@ -267,6 +275,7 @@ export const SUPPORTED_CHAT_MODELS = [
     displayName: "Gemini 2.5 Pro",
     requiresApiKey: true,
     canBeHosted: true,
+    tier: "pro",
     byokProvider: "google",
     upstreamModelId: "gemini-2.5-pro",
     pricing: {
@@ -344,4 +353,13 @@ export function getModelContextWindow(modelId: string): number {
 export function getModelFallbackId(modelId: string): string | null {
   const m = findSupportedChatModel(modelId);
   return m && "fallback" in m && typeof m.fallback === "string" ? m.fallback : null;
+}
+
+// A premium hosted model that, when run on DarkCode's infra (metered), requires
+// an active Pro subscription. `tier` only exists on the entries that carry it
+// (the registry is `as const`), so probe with `"tier" in m` — same pattern as
+// `getModelFallbackId`. BYOK use is never gated by this; see chat.ts.
+export function isProTierModel(modelId: string): boolean {
+  const m = findSupportedChatModel(modelId);
+  return m != null && "tier" in m && m.tier === "pro";
 }
