@@ -95,6 +95,10 @@ app.use(
 app.use("/sessions/*", requireAuth);
 app.use("/chat/*", requireAuth);
 app.use("/billing/checkout", requireAuth);
+// Sub-paths of /checkout (e.g. /checkout/pro) need their own guard — a
+// non-wildcard use() matches only the exact path in Hono, so without this the
+// Pro checkout would run unauthenticated with an undefined userId.
+app.use("/billing/checkout/*", requireAuth);
 app.use("/billing/portal", requireAuth);
 app.use("/billing/balance", requireAuth);
 app.use("/billing/usage", requireAuth);

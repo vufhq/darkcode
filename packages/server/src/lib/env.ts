@@ -49,6 +49,12 @@ const schema = z.object({
   // meter_credit benefit, created by `bun run provision:free-tier`. Unset = the
   // free tier is disabled and `ensureFreeTierGrant` is a no-op.
   POLAR_FREE_GRANT_PRODUCT_ID: Optional,
+  // Pro subscription tier (Item 4): the paid recurring product carrying the
+  // monthly included-credits benefit, created by `bun run provision:pro-tier`.
+  // Unset = Pro is disabled — `/checkout/pro` 503s and premium-model tiering is
+  // inert (premium models stay available to anyone on credits, current
+  // behavior). Set it to flip on Pro checkout + premium gating.
+  POLAR_PRO_PRODUCT_ID: Optional,
 
   // Public URL of the website (no trailing slash). Used as the Polar
   // checkout success/return URL so users land back on /dashboard/billing

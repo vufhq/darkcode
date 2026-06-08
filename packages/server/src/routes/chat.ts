@@ -18,10 +18,12 @@ import type { Prisma } from "@darkcode/database";
 import {
   BYOK_PROVIDERS,
   BYOK_PROVIDER_HEADER,
+  BYOK_PROVIDER_LABELS,
   findSupportedChatModel,
   getModelContextWindow,
   getModelFallbackId,
   getToolContracts,
+  isProTierModel,
   Mode,
   modeSchema,
   type ModeType,
@@ -33,7 +35,7 @@ import { compactWorkingContext } from "../lib/compaction";
 import { projectNextRequestTokens } from "../lib/token-estimate";
 import { safeErrorMessage } from "../lib/safe-error";
 import type { AuthenticatedEnv } from "../middleware/require-auth";
-import { getAvailableCreditsBalance } from "../lib/polar";
+import { getAvailableCreditsBalance, hasActiveProSubscription } from "../lib/polar";
 import { ingestAiUsageWithOutbox } from "../lib/polar-outbox";
 import { claimIdempotencyKey } from "../lib/idempotency";
 import { calculateCreditsForUsage } from "../lib/credits";
@@ -234,6 +236,46 @@ const app = new Hono<AuthenticatedEnv>()
       // model's registered fallback IF the user has that provider's BYOK key
       // (so the fallback turn is unmetered); otherwise we refuse with 402.
       if (resolvedModel.isMetered) {
+        // Premium-model tiering (Item 4): premium hosted models require an active
+        // Pro subscription. Only metered turns (running on our infra) reach here
+        // — a BYOK turn bills the user's own account and is never tier-gated.
+        // Inert until Pro is provisioned: with POLAR_PRO_PRODUCT_ID unset,
+        // hasActiveProSubscription returns false but we don't even ask, so
+        // premium models stay available to anyone on credits (current behavior).
+        if (env.POLAR_PRO_PRODUCT_ID && isProTierModel(effectiveModelId)) {
+          let isPro: boolean;
+          try {
+            isPro = await hasActiveProSubscription(userId);
+          } catch (error) {
+            // Fail OPEN on a Polar/network glitch — same stance as the credit
+            // gate below. Walling a possibly-paying user out of a model because
+            // the billing system hiccuped is the churn moment we refuse to make.
+            log.warn(
+              { err: error, userId, requestId },
+              "pro_check_unavailable_fail_open",
+            );
+            captureException(error, { userId, requestId, tags: { kind: "polar_pro_check" } });
+            isPro = true;
+          }
+
+          if (!isPro) {
+            void logAuditEvent({ userId, action: "pro.required", requestId });
+            // All premium models require an API key, so there's always a BYOK
+            // escape hatch to point at. `code` lets the CLI render an actionable
+            // affordance without string-matching the human message.
+            const byokHint = modelDefinition.requiresApiKey
+              ? ` Or add your own ${BYOK_PROVIDER_LABELS[modelDefinition.byokProvider]} API key with /keys to use it on your own account.`
+              : "";
+            return c.json(
+              {
+                error: `${modelDefinition.displayName} is a Pro model. Subscribe with /pro to unlock it.${byokHint}`,
+                code: "pro_required",
+              },
+              402,
+            );
+          }
+        }
+
         let creditsBalance: number | null;
         try {
           creditsBalance = await getAvailableCreditsBalance(userId);

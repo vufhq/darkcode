@@ -8,9 +8,12 @@ export type AuditAction =
   | "session.create"
   | "session.compact"
   | "billing.checkout"
+  | "billing.checkout_pro"
   | "billing.portal"
   | "billing.free_tier_granted"
-  | "credits.depleted";
+  | "billing.free_tier_blocked"
+  | "credits.depleted"
+  | "pro.required";
 
 type AuditEvent = {
   userId: string;

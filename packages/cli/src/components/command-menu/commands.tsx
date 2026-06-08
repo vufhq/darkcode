@@ -14,7 +14,7 @@ import type { Command } from "./types";
 import { performLogin } from "../../lib/oauth";
 import { clearAuth } from "../../lib/auth";
 
-import { openBillingPortal, openUpgradeCheckout } from "../../lib/upgrade";
+import { openBillingPortal, openProCheckout, openUpgradeCheckout } from "../../lib/upgrade";
 import { apiClient } from "../../lib/api-client";
 import { getErrorMessage } from "../../lib/http-errors";
 
@@ -131,6 +131,25 @@ export const COMMANDS: Command[] = [
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to open checkout";
+        ctx.toast.show({ variant: "error", message });
+      }
+    },
+  },
+  {
+    name: "pro",
+    description: "Subscribe to DarkCode Pro",
+    value: "/pro",
+    action: async (ctx) => {
+      ctx.toast.show({ message: "Opening Pro checkout..." });
+
+      try {
+        await openProCheckout();
+        ctx.toast.show({
+          variant: "success",
+          message: "Pro checkout opened in browser",
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to open Pro checkout";
         ctx.toast.show({ variant: "error", message });
       }
     },

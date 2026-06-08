@@ -86,18 +86,26 @@ export const ModelsDialogContent = ({
             ? getApiKey(definition.byokProvider) != null
             : false;
 
+        // Premium-tier model: gated behind Pro when run on our infra (unless the
+        // user brought their own key, in which case "BYOK" wins below).
+        const isPro =
+          definition != null && "tier" in definition && definition.tier === "pro";
+
         // "Hosted" = keyless on our infra (the default model); "Local" = Ollama;
-        // "BYOK" = the user's own key; "Credits" = a hostable model with no key
-        // yet (runs on our infra, billed to credits); "Needs key" = BYOK-only.
+        // "BYOK" = the user's own key; "Pro" = a premium hosted model (needs a
+        // Pro subscription); "Credits" = a hostable model with no key yet (runs
+        // on our infra, billed to credits); "Needs key" = BYOK-only.
         const tag = !requiresKey
           ? canBeHosted
             ? "Hosted"
             : "Local"
           : hasKey
             ? "BYOK"
-            : canBeHosted
-              ? "Credits"
-              : "Needs key";
+            : isPro
+              ? "Pro"
+              : canBeHosted
+                ? "Credits"
+                : "Needs key";
 
         return (
           <box flexDirection="row" gap={1} width="100%" paddingX={1}>

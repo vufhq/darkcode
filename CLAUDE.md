@@ -78,7 +78,7 @@ Bun workspace with four packages in `packages/*`. Cross-package imports use the 
 
 ### Slash commands (`components/command-menu/commands.tsx`)
 
-`/new`, `/agents` (mode switch), `/models`, `/keys`, `/sessions`, `/theme`, `/login`, `/logout`, `/upgrade`, `/usage`, `/compact`, `/mcp` (viewer), `/permissions` (viewer), `/audit` (viewer), `/yolo`, `/auto-edit`, `/safe`, `/exit`.
+`/new`, `/agents` (mode switch), `/models`, `/keys`, `/sessions`, `/theme`, `/login`, `/logout`, `/upgrade` (credit top-up), `/pro` (Pro subscription checkout), `/usage`, `/compact`, `/mcp` (viewer), `/permissions` (viewer), `/audit` (viewer), `/yolo`, `/auto-edit`, `/safe`, `/exit`.
 
 ### Tool calling flow (end to end)
 
