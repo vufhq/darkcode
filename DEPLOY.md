@@ -104,6 +104,31 @@ into the **Railway** API env:
 > The event shape is exactly `{ name: "darkcode_usage", metadata: { credits } }`.
 > Don't rename the event or the `credits` key without updating the meter filter.
 
+**Recurring tiers (free + Pro).** Once the meter exists, provision the two
+subscription tiers against it. Each is a product carrying a `meter_credit`
+benefit on the **same** `POLAR_CREDITS_METER_ID`, so the existing balance
+gauge/gate read them with zero code changes. Run locally with the production
+`.env` loaded (bun auto-loads it):
+
+```sh
+bun run provision:free-tier --allow-production   # prints POLAR_FREE_GRANT_PRODUCT_ID
+bun run provision:pro-tier  --allow-production   # prints POLAR_PRO_PRODUCT_ID
+```
+
+Copy each printed product id into the Railway API env. Both features are
+**inert until their id is set**: with `POLAR_FREE_GRANT_PRODUCT_ID` unset the
+free grant is a no-op; with `POLAR_PRO_PRODUCT_ID` unset `/pro` returns 503 and
+premium-model tiering (Opus / GPT-5.4 / Gemini Pro) stays off. Tune allotments
+at provision time via `POLAR_FREE_GRANT_CREDITS`, `POLAR_PRO_CREDITS`,
+`POLAR_PRO_PRICE_USD`. Both scripts are idempotent (skip if the id already
+resolves; `--force` to override).
+
+> Not yet verified in production: that the `rollover:false` benefit refreshes
+> the allowance each billing cycle, and how free + Pro + pay-as-you-go credits
+> net against each other on the **shared** meter. Confirm with a short-interval
+> sandbox run before relying on either tier (see MONETIZATION.md "Left before
+> launch").
+
 ---
 
 ## Step 4 — Website on Vercel (`darkcode.sh`)
@@ -191,6 +216,8 @@ to boot without them).
 | **`POLAR_ACCESS_TOKEN`** | Polar prod token |
 | **`POLAR_PRODUCT_ID`** | credits product id |
 | **`POLAR_CREDITS_METER_ID`** | meter id |
+| `POLAR_FREE_GRANT_PRODUCT_ID` | recurring free-tier product (`provision:free-tier`); unset = free tier off |
+| `POLAR_PRO_PRODUCT_ID` | Pro subscription product (`provision:pro-tier`); unset = `/pro` 503s + premium tiering off |
 | `POLAR_SERVER` | `production` |
 | `WEBSITE_URL` | `https://darkcode.sh` |
 | `CORS_ORIGINS` | `https://darkcode.sh,https://www.darkcode.sh` |
