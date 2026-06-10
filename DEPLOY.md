@@ -104,6 +104,12 @@ into the **Railway** API env:
 > The event shape is exactly `{ name: "darkcode_usage", metadata: { credits } }`.
 > Don't rename the event or the `credits` key without updating the meter filter.
 
+> **`POLAR_SERVER` defaults to `sandbox`** (`lib/env.ts`). Leaving it unset in
+> production points the SDK at Polar's sandbox API, so every credit read and
+> usage ingest fails against your production token — live customers see no
+> credits and metering silently falls into the retry outbox. Set it to
+> `production` explicitly.
+
 **Recurring tiers (free + Pro).** Once the meter exists, provision the two
 subscription tiers against it. Each is a product carrying a `meter_credit`
 benefit on the **same** `POLAR_CREDITS_METER_ID`, so the existing balance
@@ -123,11 +129,19 @@ at provision time via `POLAR_FREE_GRANT_CREDITS`, `POLAR_PRO_CREDITS`,
 `POLAR_PRO_PRICE_USD`. Both scripts are idempotent (skip if the id already
 resolves; `--force` to override).
 
-> Not yet verified in production: that the `rollover:false` benefit refreshes
-> the allowance each billing cycle, and how free + Pro + pay-as-you-go credits
-> net against each other on the **shared** meter. Confirm with a short-interval
-> sandbox run before relying on either tier (see MONETIZATION.md "Left before
-> launch").
+> **Shared-meter netting is verified** (sandbox, 2026-06-09 via `verify:tiers`):
+> free + Pro + pay-as-you-go grants stack additively on one meter (75 + 900 +
+> 100 → 1075 credited) and a `darkcode_usage` debit nets against the combined
+> pool (1075 → 1025), so all three tiers can share `POLAR_CREDITS_METER_ID` with
+> no read-path change. **Still unverified:** that the `rollover:false` benefit
+> *refreshes* the allowance each billing cycle — time-gated, and Polar only bills
+> `month`/`year` intervals so a renewal has to elapse. A `bun run verify:tiers
+> --keep` run leaves the throwaway subscriptions alive for a later `bun run
+> verify:tiers --check <externalId>` (PASS = the allowance resets, not stacks).
+> This needn't block launch: if it's wrong the only effect is credits *stacking*
+> instead of resetting — a detectable over-grant, not a customer-billing bug —
+> which you can confirm by watching the meter's `creditedUnits` on the first real
+> renewal. See MONETIZATION.md "Left before launch".
 
 ---
 
@@ -179,6 +193,14 @@ The `Release` workflow builds standalone binaries on native runners
 sidecars, and attaches them to the GitHub Release. The install scripts pull
 from `releases/latest`.
 
+> The canonical installers live at `scripts/install.sh` and `scripts/install.ps1`
+> in **this** repo; the website (Step 4) must serve those same two files at
+> `darkcode.sh/install.sh` and `/install.ps1`. The published one-liner is
+> whatever the website serves — keep the website's copies in sync with these.
+> Note: the arm64 Linux runner (`ubuntu-24.04-arm`) isn't on every GitHub
+> Actions plan; drop that matrix row in `release.yml` if yours lacks it (the
+> other four targets still publish).
+
 ---
 
 ## Step 7 — Smoke test
@@ -193,6 +215,27 @@ darkcode                # boots the TUI
 Check: login round-trips through `api.darkcode.sh/auth/callback`; a metered
 chat decrements credits; `/upgrade` opens Polar checkout and returns to
 `darkcode.sh/dashboard/billing`.
+
+---
+
+## Operations
+
+Day-2 essentials once you're live:
+
+- **Rollback.** Railway keeps every deploy — open the service's *Deployments*
+  tab and redeploy the last good one. Migrations are **forward-only**: a
+  rollback that needs a schema change takes a *new* migration, not a Prisma
+  down.
+- **Backups.** Enable automated backups on the Railway Postgres (Database →
+  Backups). The credit ledger of record is Polar, but sessions, the audit log,
+  and the Polar-retry outbox live **only** in Postgres.
+- **Monitoring.** Set `SENTRY_DSN` (+ `SENTRY_TRACES_SAMPLE_RATE`) to capture
+  server errors and outbox-sweeper failures. `/healthz` is liveness (drives the
+  container restart); `/readyz` reports DB/Redis readiness for a load balancer
+  **without** triggering a restart.
+- **Scaling.** Only raise `numReplicas` in `railway.toml` after `REDIS_URL` is
+  set — otherwise the rate-limit and idempotency stores fall back to per-instance
+  memory and stop being consistent across replicas (Step 1.8).
 
 ---
 
@@ -218,7 +261,7 @@ to boot without them).
 | **`POLAR_CREDITS_METER_ID`** | meter id |
 | `POLAR_FREE_GRANT_PRODUCT_ID` | recurring free-tier product (`provision:free-tier`); unset = free tier off |
 | `POLAR_PRO_PRODUCT_ID` | Pro subscription product (`provision:pro-tier`); unset = `/pro` 503s + premium tiering off |
-| `POLAR_SERVER` | `production` |
+| `POLAR_SERVER` | `production` — set explicitly; **defaults to `sandbox`** if unset |
 | `WEBSITE_URL` | `https://darkcode.sh` |
 | `CORS_ORIGINS` | `https://darkcode.sh,https://www.darkcode.sh` |
 | `REDIS_URL` | from Railway Redis |
