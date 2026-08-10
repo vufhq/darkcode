@@ -189,9 +189,14 @@ function resolveGoogleModelHosted(model: GoogleModel): ResolvedModel {
 }
 
 function resolveOllamaModel(model: OllamaModel): ResolvedModel {
-  // Ollama exposes an OpenAI-compatible endpoint. No API key is needed for
-  // local inference. The base URL can be overridden via OLLAMA_BASE_URL
-  // (defaults to http://localhost:11434/v1 per the env schema).
+  // Ollama exposes an OpenAI-compatible endpoint. No API key is needed.
+  //
+  // NOTE: this resolves and runs on the SERVER, like every other provider —
+  // `OLLAMA_BASE_URL` is the server's view of the network, not the CLI user's.
+  // On a hosted deployment that means the API server's own localhost, so this
+  // model is only meaningful for self-hosted instances. The README says so.
+  // It is also `isMetered: false`, so pointing this at a reachable endpoint on
+  // a multi-tenant deployment hands out free inference — keep it unset there.
   const baseURL = env.OLLAMA_BASE_URL;
   // Allow the operator to point at a different pulled model at runtime.
   const upstreamModelId = env.OLLAMA_DEFAULT_MODEL ?? model.upstreamModelId;

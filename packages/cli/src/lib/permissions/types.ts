@@ -15,6 +15,11 @@ export type BashRules = {
 export type FsRules = {
   allowWrite: string[];
   denyWrite: string[];
+  // Paths whose *contents* must never reach the model. Reads are otherwise
+  // unrestricted; this list is a hard deny, not a prompt. Kept separate from
+  // `denyWrite` because the two protect against different things — clobbering
+  // a secret vs. exfiltrating one — even though they seed from the same globs.
+  denyRead: string[];
 };
 
 // MCP rules match against the wire-format tool name (`mcp__<server>__<tool>`).

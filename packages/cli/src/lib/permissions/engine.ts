@@ -1,5 +1,5 @@
 import { classifyBash } from "./bash-classifier";
-import { classifyFsWrite } from "./path-guards";
+import { classifyFsRead, classifyFsWrite } from "./path-guards";
 import { classifyMcpCall } from "./mcp-classifier";
 import { addProjectRule, loadPolicy } from "./policy";
 import { writeAudit } from "./audit";
@@ -49,15 +49,20 @@ async function ask(req: PermissionRequest): Promise<UserResponse> {
 
 type BashOp = { kind: "bash"; command: string };
 type FsWriteOp = { kind: "fs"; projectRelativePath: string };
+type FsReadOp = { kind: "fs-read"; projectRelativePath: string };
 type McpCallOp = { kind: "mcp"; toolName: string; args?: unknown };
-export type GuardedOp = BashOp | FsWriteOp | McpCallOp;
+export type GuardedOp = BashOp | FsWriteOp | FsReadOp | McpCallOp;
 
 // Classify an operation against the loaded policy. Does not consult the
 // user — the engine wraps this with the prompt flow.
 function classify(op: GuardedOp): DecisionOutcome {
   const policy = loadPolicy();
-  if (op.kind === "bash") return classifyBash(op.command, policy.bash);
+  // The fs rules go to the bash classifier too: a shell redirect (`> .env`)
+  // writes a file without ever touching the writeFile tool, so both routes
+  // have to answer to the same policy.
+  if (op.kind === "bash") return classifyBash(op.command, policy.bash, policy.fs);
   if (op.kind === "mcp") return classifyMcpCall(op.toolName, policy.mcp);
+  if (op.kind === "fs-read") return classifyFsRead(op.projectRelativePath, policy.fs);
   return classifyFsWrite(op.projectRelativePath, policy.fs);
 }
 
@@ -70,6 +75,7 @@ function summary(op: GuardedOp): string {
 function toolName(op: GuardedOp): string {
   if (op.kind === "bash") return "bash";
   if (op.kind === "mcp") return op.toolName;
+  if (op.kind === "fs-read") return "fs.read";
   return "fs.write";
 }
 
@@ -82,13 +88,30 @@ function persistAllowAlways(op: GuardedOp): void {
     addProjectRule({ category: "bash", list: "allow", pattern: op.command });
   } else if (op.kind === "mcp") {
     addProjectRule({ category: "mcp", list: "allow", pattern: op.toolName });
-  } else {
+  } else if (op.kind === "fs") {
     addProjectRule({
       category: "fs",
       list: "allowWrite",
       pattern: op.projectRelativePath,
     });
   }
+  // `fs-read` never reaches the prompt — classifyFsRead only ever returns
+  // allow or deny — so there is no rule to persist for it.
+}
+
+// Non-throwing read check, for callers that walk many files and need to skip
+// protected ones rather than abort the whole operation (grep). The audit entry
+// is written only for refusals — logging every file a search touched would
+// drown the audit log.
+// Note there is no posture short-circuit: neither `auto-edit` nor `yolo`
+// relaxes denyRead, matching how checkPermission treats it.
+export function isReadAllowed(projectRelativePath: string): boolean {
+  const outcome = classify({ kind: "fs-read", projectRelativePath });
+  if (outcome.decision === "deny") {
+    writeAudit("fs.read", projectRelativePath, outcome);
+    return false;
+  }
+  return true;
 }
 
 // The single entry point used by local-tools.ts. Returns when the op is
@@ -96,11 +119,12 @@ function persistAllowAlways(op: GuardedOp): void {
 export async function checkPermission(op: GuardedOp): Promise<void> {
   // Posture short-circuits, evaluated before the policy. `yolo` is the
   // explicit override and auto-allows side effects — but never the fs
-  // `denyWrite` list (.env, *.pem, **/.ssh/**, …). Overwriting secrets or SSH
-  // keys is never what a user means by "yolo", so those still hard-deny. The
-  // decision is recorded either way so the audit trail isn't silent.
+  // `denyWrite`/`denyRead` lists (.env, *.pem, **/.ssh/**, …). Overwriting or
+  // exfiltrating secrets is never what a user means by "yolo", so those still
+  // hard-deny. The decision is recorded either way so the audit trail isn't
+  // silent.
   if (posture === "yolo") {
-    if (op.kind === "fs") {
+    if (op.kind === "fs" || op.kind === "fs-read") {
       const outcome = classify(op);
       if (outcome.decision === "deny") {
         writeAudit(toolName(op), summary(op), outcome);

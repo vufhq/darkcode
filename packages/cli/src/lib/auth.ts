@@ -1,4 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  unlinkSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -38,6 +45,16 @@ export function saveAuth(data: AuthData) {
     mkdirSync(AUTH_DIR, { mode: 0o700 });
   }
   writeFileSync(AUTH_FILE, JSON.stringify(data), { mode: 0o600 });
+  // `mode` on writeFileSync only applies when the file is CREATED. A file left
+  // world-readable by an older build (or a stray `touch`) would silently keep
+  // those permissions across every subsequent login, so re-assert them.
+  // No-op on Windows, and never fatal — losing a login over a chmod would be
+  // a worse outcome than the permissions being loose.
+  try {
+    chmodSync(AUTH_FILE, 0o600);
+  } catch {
+    // Best effort.
+  }
 }
 
 export function clearAuth() {

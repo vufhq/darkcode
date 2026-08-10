@@ -16,8 +16,11 @@ type BillableUsage = {
 };
 
 type TokenCounts = {
+  /** Fresh (uncached) input tokens — `inputTokens` minus any cached portion. */
   inputTokens: number;
   outputTokens: number;
+  /** Input tokens served from the provider's prompt cache. */
+  cachedInputTokens: number;
 };
 
 const TOKENS_PER_MILLION = 1_000_000;
@@ -27,26 +30,36 @@ const TOKENS_PER_MILLION = 1_000_000;
 // this constant if product wants a finer unit like 0.001 or a coarser one.
 const USD_PER_CREDIT = 0.01;
 
+function isNonNegativeInteger(value: number | undefined | null): value is number {
+  return (
+    value != null &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= 0
+  );
+}
+
 function getTokenCounts(usage: LanguageModelUsage): TokenCounts {
   const inputTokens = usage.inputTokens;
   const outputTokens = usage.outputTokens;
 
-  if (
-    inputTokens == null ||
-    outputTokens == null ||
-    !Number.isFinite(inputTokens) ||
-    !Number.isFinite(outputTokens) ||
-    !Number.isInteger(inputTokens) ||
-    !Number.isInteger(outputTokens) ||
-    inputTokens < 0 ||
-    outputTokens < 0
-  ) {
+  if (!isNonNegativeInteger(inputTokens) || !isNonNegativeInteger(outputTokens)) {
     throw new Error("Credit conversion requires input and output token counts");
   }
 
+  // Providers report `cachedInputTokens` as a SUBSET of `inputTokens`, so the
+  // fresh count is the difference. A provider that omits the field (or reports
+  // something nonsensical) falls back to charging everything at the fresh rate
+  // — the old behavior, and the safe direction for us rather than the user.
+  const reportedCached = (usage as { cachedInputTokens?: number }).cachedInputTokens;
+  const cachedInputTokens = isNonNegativeInteger(reportedCached)
+    ? Math.min(reportedCached, inputTokens)
+    : 0;
+
   return {
-    inputTokens,
+    inputTokens: inputTokens - cachedInputTokens,
     outputTokens,
+    cachedInputTokens,
   };
 };
 
@@ -64,9 +77,18 @@ function getModelPricing(provider: string, model: string): ModelPricing {
   return supportedModel.pricing;
 };
 
-function estimateCostUsd({ inputTokens, outputTokens }: TokenCounts, pricing: ModelPricing) {
+function estimateCostUsd(
+  { inputTokens, outputTokens, cachedInputTokens }: TokenCounts,
+  pricing: ModelPricing,
+) {
+  // Cache reads cost a fraction of fresh input. Models without a published
+  // cached rate bill at the fresh rate (see ModelPricing).
+  const cachedRate =
+    pricing.cachedInputUsdPerMillionTokens ?? pricing.inputUsdPerMillionTokens;
+
   return (
     (inputTokens * pricing.inputUsdPerMillionTokens +
+      cachedInputTokens * cachedRate +
       outputTokens * pricing.outputUsdPerMillionTokens) /
     TOKENS_PER_MILLION
   );
@@ -97,3 +119,35 @@ export function calculateCreditsForUsage({
     credits,
   };
 };
+
+// Up-front cost estimate for a turn we haven't run yet, used by the chat
+// route's credit gate. The gate previously asked only "is the balance above
+// zero", which let a one-credit account start a turn that costs orders of
+// magnitude more — and, because nothing is reserved, let every request inside
+// the rate-limit window pass the same check before any of them billed.
+//
+// Deliberately conservative: `projectedInputTokens` already carries a response
+// reserve, and we bill the reserve at the (higher) output rate.
+export function estimateCreditsForProjectedTurn({
+  provider,
+  model,
+  projectedInputTokens,
+  responseReserveTokens,
+}: {
+  provider: string;
+  model: string;
+  projectedInputTokens: number;
+  responseReserveTokens: number;
+}): number {
+  const pricing = getModelPricing(provider, model);
+  const inputTokens = Math.max(0, projectedInputTokens - responseReserveTokens);
+
+  // Assume nothing is cached — an estimate that under-reads the cost is the
+  // one that lets the overrun through.
+  const estimatedCostUsd = estimateCostUsd(
+    { inputTokens, outputTokens: responseReserveTokens, cachedInputTokens: 0 },
+    pricing,
+  );
+
+  return convertUsdToCredits(estimatedCostUsd);
+}
