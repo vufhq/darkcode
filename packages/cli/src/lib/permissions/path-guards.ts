@@ -45,6 +45,34 @@ function normalize(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
+// Does this path, read literally, point outside the project directory?
+//
+// Purely lexical — it's used on shell redirect targets, which never reach
+// `resolveInsideCwd` and so have no resolved form to check. Absolute paths,
+// `~` expansions, Windows drive/UNC roots, and any `..` that climbs above the
+// project root all count as escaping.
+export function escapesProject(path: string): boolean {
+  const normalized = normalize(path.trim());
+  if (normalized.length === 0) return false;
+
+  if (normalized.startsWith("/")) return true;
+  if (normalized === "~" || normalized.startsWith("~/")) return true;
+  // `C:/…` or `//server/share`.
+  if (/^[a-zA-Z]:/.test(normalized)) return true;
+
+  let depth = 0;
+  for (const segment of normalized.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      depth--;
+      if (depth < 0) return true;
+      continue;
+    }
+    depth++;
+  }
+  return false;
+}
+
 function firstMatch(path: string, patterns: string[]): string | null {
   const normalized = normalize(path);
   for (const pattern of patterns) {
@@ -77,6 +105,29 @@ export function classifyFsWrite(projectRelativePath: string, rules: FsRules): De
   return {
     decision: "ask",
     reason: `Path "${projectRelativePath}" not covered by any rule`,
+    matchedRule: "",
+  };
+}
+
+// Classify a read against the fs policy. Reads are allow-by-default — a coding
+// agent that has to ask before every file read is unusable — but the secret
+// globs in `denyRead` are refused outright rather than prompted. A prompt is
+// the wrong control here: it arrives mid-task with no context, and the user
+// who's been clicking "allow" for the last ten reads clicks it again. Anything
+// matching is content we never want reaching the model or the server.
+export function classifyFsRead(projectRelativePath: string, rules: FsRules): DecisionOutcome {
+  const denied = firstMatch(projectRelativePath, rules.denyRead);
+  if (denied) {
+    return {
+      decision: "deny",
+      reason: `Path "${projectRelativePath}" matches a protected-file rule; its contents are never sent to the model`,
+      matchedRule: denied,
+    };
+  }
+
+  return {
+    decision: "allow",
+    reason: `Path "${projectRelativePath}" is not a protected file`,
     matchedRule: "",
   };
 }

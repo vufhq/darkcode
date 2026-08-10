@@ -32,13 +32,14 @@ import {
 import { env } from "../lib/env";
 import { buildSystemPrompt } from "../system-prompt";
 import { compactWorkingContext } from "../lib/compaction";
-import { projectNextRequestTokens } from "../lib/token-estimate";
+import { projectNextRequestTokens, RESPONSE_TOKEN_RESERVE } from "../lib/token-estimate";
 import { safeErrorMessage } from "../lib/safe-error";
 import type { AuthenticatedEnv } from "../middleware/require-auth";
 import { getAvailableCreditsBalance, hasActiveProSubscription } from "../lib/polar";
 import { ingestAiUsageWithOutbox } from "../lib/polar-outbox";
 import { claimIdempotencyKey } from "../lib/idempotency";
-import { calculateCreditsForUsage } from "../lib/credits";
+import { calculateCreditsForUsage, estimateCreditsForProjectedTurn } from "../lib/credits";
+import { getPendingCredits, reserveCredits } from "../lib/credit-reservation";
 import { captureException } from "../lib/sentry";
 import { logAuditEvent } from "../lib/audit";
 import {
@@ -204,6 +205,11 @@ const app = new Hono<AuthenticatedEnv>()
       // registry (which is what `requiresApiKey` alone can't tell us anymore —
       // hosted Claude/GPT/etc. are now metered even though they "require" a key).
       let resolvedModel: ResolvedModel;
+      // Balance as read from Polar for this turn. `null` means we couldn't read
+      // it (fail-open, see below) — kept in the outer scope because the
+      // projected-cost gate further down re-checks it once the real request
+      // size is known.
+      let creditsBalance: number | null = null;
       try {
         resolvedModel = resolveChatModel(effectiveModelId, apiKeys);
       } catch (error) {
@@ -276,7 +282,6 @@ const app = new Hono<AuthenticatedEnv>()
           }
         }
 
-        let creditsBalance: number | null;
         try {
           creditsBalance = await getAvailableCreditsBalance(userId);
         } catch (error) {
@@ -540,11 +545,78 @@ const app = new Hono<AuthenticatedEnv>()
         );
       }
 
-      const nextMessages = await validateUIMessages<DarkcodeUIMessage>({
-        messages: workingMerged,
-        tools: decodeTools,
-      });
-      const modelMessages = await convertToModelMessages(nextMessages, { tools: decodeTools });
+      // Projected-cost gate. The balance check above only established that the
+      // user has *some* credit; now that the real request size is known, check
+      // that they can actually afford this turn. Two things this closes:
+      //
+      //   - a 1-credit account starting a 786k-token turn on a large-window
+      //     model (~100x the gate), and
+      //   - the check-then-act race, since the debit only lands after the
+      //     stream finishes. Concurrent turns each reserve their estimate, and
+      //     the reservation total is subtracted from the balance here.
+      //
+      // Skipped entirely when the balance is unknown (`null`) — that's the
+      // deliberate fail-open stance from the gate above, and it would be
+      // perverse to reintroduce a hard block here.
+      let releaseReservation: (() => Promise<void>) | null = null;
+      if (resolvedModel.isMetered && creditsBalance !== null) {
+        const projectedCredits = estimateCreditsForProjectedTurn({
+          provider: resolvedModel.provider,
+          model: resolvedModel.modelId,
+          projectedInputTokens: finalProjection,
+          responseReserveTokens: RESPONSE_TOKEN_RESERVE,
+        });
+        const pending = await getPendingCredits(userId);
+        const available = creditsBalance - pending;
+
+        if (projectedCredits > available) {
+          void logAuditEvent({ userId, action: "credits.insufficient_for_turn", requestId });
+          log.info(
+            { userId, requestId, projectedCredits, creditsBalance, pending },
+            "chat.turn_exceeds_balance",
+          );
+          return c.json(
+            {
+              error:
+                pending > 0
+                  ? "Not enough credits for this turn while your other requests are still running. Wait for them to finish, or run /upgrade to add credits."
+                  : "This turn needs more credits than you have left. Run /upgrade to add credits, or switch to a smaller model or a shorter conversation.",
+              code: "credits_depleted",
+              projectedCredits,
+              availableCredits: available,
+            },
+            402,
+          );
+        }
+
+        releaseReservation = await reserveCredits(userId, projectedCredits);
+      }
+
+      // Release the reservation however this turn ends — normal finish, client
+      // disconnect, or an upstream throw. The real debit is ingested in
+      // onFinish; the reservation only has to cover the window between the
+      // gate and that ingest.
+      const releaseOnce = async () => {
+        if (!releaseReservation) return;
+        const release = releaseReservation;
+        releaseReservation = null;
+        await release();
+      };
+
+      let nextMessages: DarkcodeUIMessage[];
+      let modelMessages: Awaited<ReturnType<typeof convertToModelMessages>>;
+      try {
+        nextMessages = await validateUIMessages<DarkcodeUIMessage>({
+          messages: workingMerged,
+          tools: decodeTools,
+        });
+        modelMessages = await convertToModelMessages(nextMessages, { tools: decodeTools });
+      } catch (error) {
+        // Decoding threw before the stream ever started — free the reservation
+        // rather than leaving it to time out.
+        await releaseOnce();
+        throw error;
+      }
       let completedUsage: LanguageModelUsage | null = null;
 
       const result = streamText({
@@ -592,8 +664,62 @@ const app = new Hono<AuthenticatedEnv>()
           };
         },
         async onFinish(event) {
+          // Always let the reservation go, whatever the turn did. The real
+          // debit is ingested just below.
+          await releaseOnce();
+
           if (event.isAborted) return;
 
+          // Meter BEFORE the pending-tool-call guard below.
+          //
+          // No tool contract defines an `execute` — every tool, built-in and
+          // MCP alike, is dispatched client-side — so a turn where the model
+          // calls a tool ends with that part still pending. In an agentic
+          // coding tool that describes *most* turns. Billing after the guard
+          // meant a ten-step task charged only for the final text-only turn
+          // while we paid the provider for all eleven.
+          //
+          // The event id is derived from the response message id and the
+          // outbox de-duplicates on it, so metering here stays idempotent
+          // even though the turn may be continued below.
+          if (completedUsage && resolvedModel.isMetered) {
+            try {
+              const billableUsage = calculateCreditsForUsage({
+                provider: resolvedModel.provider,
+                model: resolvedModel.modelId,
+                usage: completedUsage,
+              });
+
+              // Inline-first; queues to the Postgres-backed outbox on failure so
+              // the background sweeper can retry without losing the event.
+              await ingestAiUsageWithOutbox({
+                externalCustomerId: userId,
+                eventId: `chat-message:${event.responseMessage.id}`,
+                credits: billableUsage.credits,
+              });
+            } catch (error) {
+              // calculateCreditsForUsage can throw (bad usage shape). Surface it
+              // but don't fail the request — the response has already streamed.
+              log.error(
+                {
+                  err: error,
+                  sessionId: id,
+                  messageId: event.responseMessage.id,
+                },
+                "polar_credit_calc_failed",
+              );
+              captureException(error, {
+                userId,
+                requestId,
+                tags: { kind: "polar_credit_calc" },
+                extra: { sessionId: id, messageId: event.responseMessage.id },
+              });
+            }
+          }
+
+          // Persistence still waits for the turn to settle: a transcript with a
+          // dangling tool call isn't a valid resume point, and the CLI resends
+          // the messages on the next request anyway.
           if (hasPendingToolCalls(event.responseMessage)) return;
 
           // `event.messages` is `nextMessages` (the working set we sent) plus
@@ -616,45 +742,11 @@ const app = new Hono<AuthenticatedEnv>()
                 : {}),
             },
           });
-
-          if (!completedUsage) return;
-          // BYOK calls aren't billed through us, so don't ingest a Polar usage event.
-          if (!resolvedModel.isMetered) return;
-
-          try {
-            const billableUsage = calculateCreditsForUsage({
-              provider: resolvedModel.provider,
-              model: resolvedModel.modelId,
-              usage: completedUsage,
-            });
-
-            // Inline-first; queues to the Postgres-backed outbox on failure so
-            // the background sweeper can retry without losing the event.
-            await ingestAiUsageWithOutbox({
-              externalCustomerId: userId,
-              eventId: `chat-message:${event.responseMessage.id}`,
-              credits: billableUsage.credits,
-            });
-          } catch (error) {
-            // calculateCreditsForUsage can throw (bad usage shape). Surface it
-            // but don't fail the request — the response has already streamed.
-            log.error(
-              {
-                err: error,
-                sessionId: id,
-                messageId: event.responseMessage.id,
-              },
-              "polar_credit_calc_failed",
-            );
-            captureException(error, {
-              userId,
-              requestId,
-              tags: { kind: "polar_credit_calc" },
-              extra: { sessionId: id, messageId: event.responseMessage.id },
-            });
-          }
         },
         onError(error) {
+          // A stream that errors never reaches onFinish, so the reservation
+          // has to be freed here too or it sits until the TTL expires.
+          void releaseOnce();
           // Same protection as app.onError: a raw AI_APICallError.message can
           // include the full request body, which surfaces in the CLI as a
           // dump of the whole conversation.

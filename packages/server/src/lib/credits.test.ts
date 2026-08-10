@@ -90,6 +90,64 @@ describe("calculateCreditsForUsage — billing safety", () => {
   });
 });
 
+describe("calculateCreditsForUsage — cached input tokens", () => {
+  // `cachedInputTokens` is a SUBSET of `inputTokens`, so the fresh count is the
+  // difference. darkcode-ai: $0.60/M fresh, $0.15/M cached, $2.50/M output.
+  function cachedUsage(
+    inputTokens: number,
+    outputTokens: number,
+    cachedInputTokens: number,
+  ): LanguageModelUsage {
+    return {
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      totalTokens: inputTokens + outputTokens,
+    } as LanguageModelUsage;
+  }
+
+  test("bills cache reads at the cached rate, not the fresh one", () => {
+    // 1M input of which 800k cached: 200k fresh * $0.60 + 800k * $0.15
+    // = $0.12 + $0.12 = $0.24 -> 24 credits.
+    expect(
+      calculateCreditsForUsage({ ...HOSTED, usage: cachedUsage(1_000_000, 0, 800_000) }).credits,
+    ).toBe(24);
+  });
+
+  test("charges the full fresh rate when nothing is cached", () => {
+    // Same total input, no cache: 1M * $0.60 = $0.60 -> 60 credits.
+    expect(
+      calculateCreditsForUsage({ ...HOSTED, usage: cachedUsage(1_000_000, 0, 0) }).credits,
+    ).toBe(60);
+  });
+
+  test("a cache-heavy session costs materially less than the old flat math", () => {
+    // This is the whole point of the split: the old code charged 60 credits
+    // for the cache-heavy turn above. Guard the direction, not just the number.
+    const cached = calculateCreditsForUsage({
+      ...HOSTED,
+      usage: cachedUsage(1_000_000, 0, 800_000),
+    }).credits;
+    const uncached = calculateCreditsForUsage({
+      ...HOSTED,
+      usage: cachedUsage(1_000_000, 0, 0),
+    }).credits;
+    expect(cached).toBeLessThan(uncached);
+  });
+
+  test("ignores a cached count that exceeds the input count", () => {
+    // Clamped rather than producing a negative fresh count (and a credit).
+    expect(
+      calculateCreditsForUsage({ ...HOSTED, usage: cachedUsage(1000, 0, 999_999) }).credits,
+    ).toBe(1);
+  });
+
+  test("falls back to the fresh rate when the provider omits the field", () => {
+    // `usage()` builds an object with no cachedInputTokens at all.
+    expect(calculateCreditsForUsage({ ...HOSTED, usage: usage(1_000_000, 0) }).credits).toBe(60);
+  });
+});
+
 describe("calculateCreditsForUsage — malformed usage", () => {
   test("throws when a token count is missing", () => {
     expect(() => calculateCreditsForUsage({ ...HOSTED, usage: usage(undefined, 5) })).toThrow(

@@ -90,13 +90,17 @@ export const DEFAULT_POLICY: Policy = {
   },
   fs: {
     allowWrite: [
-      // The agent's normal workspace. Project-specific paths get added by
-      // the user via "allow always" in the prompt.
+      // NOTE: this is a blanket allow — every write inside the project is
+      // auto-approved, and only `denyWrite` below stops anything. That is a
+      // deliberate product call (a coding agent that prompts on every edit is
+      // unusable), but it means the `normal` posture differs from `auto-edit`
+      // only for bash and MCP, not for file edits. Narrow this list if you
+      // want per-path write prompts.
       "**",
     ],
+    // Common secret locations. These globs are tested against the
+    // project-relative path, so a write to `./.env` is blocked.
     denyWrite: [
-      // Common secret locations. These globs are tested against the
-      // project-relative path, so a write to `./.env` is blocked.
       ".env",
       ".env.*",
       "**/.env",
@@ -108,6 +112,34 @@ export const DEFAULT_POLICY: Policy = {
       "**/.ssh/**",
       "**/.aws/**",
       "**/.gnupg/**",
+    ],
+    // Files whose contents must never be sent to the model. Reads are
+    // otherwise unrestricted. Seeded from `denyWrite` — a file worth
+    // protecting from being clobbered is worth protecting from exfiltration —
+    // plus credential stores that are read-only in practice and so never
+    // needed a write rule.
+    denyRead: [
+      ".env",
+      ".env.*",
+      "**/.env",
+      "**/.env.*",
+      "**/*.pem",
+      "**/*.key",
+      "**/*.p12",
+      "**/*.pfx",
+      "**/id_rsa",
+      "**/id_ed25519",
+      "**/id_ecdsa",
+      "**/.ssh/**",
+      "**/.aws/**",
+      "**/.gnupg/**",
+      "**/.npmrc",
+      "**/.pypirc",
+      "**/.netrc",
+      "**/.git-credentials",
+      // DarkCode's own credential files, if the project happens to sit at $HOME.
+      "**/.darkcode/auth.json",
+      "**/.darkcode/api-keys.json",
     ],
   },
 };

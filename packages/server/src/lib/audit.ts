@@ -13,6 +13,11 @@ export type AuditAction =
   | "billing.free_tier_granted"
   | "billing.free_tier_blocked"
   | "credits.depleted"
+  // Balance was non-zero but didn't cover this turn's projected cost (or the
+  // cost plus the user's other in-flight turns). Distinct from
+  // `credits.depleted` so the two can be told apart in the audit trail: one is
+  // "out of credits", the other is "this turn is too big for what's left".
+  | "credits.insufficient_for_turn"
   | "pro.required";
 
 type AuditEvent = {

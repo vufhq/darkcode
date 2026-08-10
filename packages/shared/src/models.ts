@@ -1,6 +1,16 @@
 export type ModelPricing = {
   inputUsdPerMillionTokens: number;
   outputUsdPerMillionTokens: number;
+  // Price for input tokens served from the provider's prompt cache. Providers
+  // charge a fraction of the fresh-input rate for these (Anthropic ~0.1x,
+  // OpenAI ~0.5x, DeepSeek ~0.1x), and a long coding session is mostly cache
+  // hits — so billing them at the fresh rate systematically overcharges, which
+  // "credits pass through at cost" (MONETIZATION.md) can't survive.
+  //
+  // Optional: when absent, cached tokens fall back to the fresh input rate.
+  // That's the old behavior and is the safe direction for a provider whose
+  // caching economics we haven't confirmed.
+  cachedInputUsdPerMillionTokens?: number;
 };
 
 // "darkcode" is our in-house provider, backed by Kimi (Moonshot) on the server.
@@ -149,6 +159,7 @@ export const SUPPORTED_CHAT_MODELS = [
     pricing: {
       inputUsdPerMillionTokens: 0.6,
       outputUsdPerMillionTokens: 2.5,
+      cachedInputUsdPerMillionTokens: 0.15,
     },
     contextWindow: 128_000,
     // When credits are depleted, prefer the user's own Claude Haiku key
@@ -165,6 +176,7 @@ export const SUPPORTED_CHAT_MODELS = [
     pricing: {
       inputUsdPerMillionTokens: 3,
       outputUsdPerMillionTokens: 15,
+      cachedInputUsdPerMillionTokens: 0.3,
     },
     contextWindow: 200_000,
     fallback: "claude-haiku-4-5",
@@ -179,6 +191,7 @@ export const SUPPORTED_CHAT_MODELS = [
     pricing: {
       inputUsdPerMillionTokens: 1,
       outputUsdPerMillionTokens: 5,
+      cachedInputUsdPerMillionTokens: 0.1,
     },
     contextWindow: 200_000,
   },
@@ -193,6 +206,7 @@ export const SUPPORTED_CHAT_MODELS = [
     pricing: {
       inputUsdPerMillionTokens: 5,
       outputUsdPerMillionTokens: 25,
+      cachedInputUsdPerMillionTokens: 0.5,
     },
     contextWindow: 200_000,
     fallback: "claude-sonnet-4-6",
@@ -208,6 +222,7 @@ export const SUPPORTED_CHAT_MODELS = [
     pricing: {
       inputUsdPerMillionTokens: 2.5,
       outputUsdPerMillionTokens: 15,
+      cachedInputUsdPerMillionTokens: 0.25,
     },
     contextWindow: 400_000,
     fallback: "gpt-5.4-mini",
@@ -222,6 +237,7 @@ export const SUPPORTED_CHAT_MODELS = [
     pricing: {
       inputUsdPerMillionTokens: 0.75,
       outputUsdPerMillionTokens: 4.5,
+      cachedInputUsdPerMillionTokens: 0.075,
     },
     contextWindow: 400_000,
   },
@@ -235,6 +251,7 @@ export const SUPPORTED_CHAT_MODELS = [
     pricing: {
       inputUsdPerMillionTokens: 0.2,
       outputUsdPerMillionTokens: 1.25,
+      cachedInputUsdPerMillionTokens: 0.02,
     },
     contextWindow: 400_000,
   },
@@ -250,6 +267,7 @@ export const SUPPORTED_CHAT_MODELS = [
     pricing: {
       inputUsdPerMillionTokens: 0.27,
       outputUsdPerMillionTokens: 1.1,
+      cachedInputUsdPerMillionTokens: 0.027,
     },
     contextWindow: 65_536,
   },
@@ -265,6 +283,7 @@ export const SUPPORTED_CHAT_MODELS = [
     pricing: {
       inputUsdPerMillionTokens: 0.55,
       outputUsdPerMillionTokens: 2.19,
+      cachedInputUsdPerMillionTokens: 0.055,
     },
     contextWindow: 65_536,
   },
@@ -282,6 +301,7 @@ export const SUPPORTED_CHAT_MODELS = [
       // Google AI pricing as of 2025 (prompts >200k tokens billed at 2x).
       inputUsdPerMillionTokens: 1.25,
       outputUsdPerMillionTokens: 10,
+      cachedInputUsdPerMillionTokens: 0.31,
     },
     contextWindow: 1_048_576,
   },
@@ -296,6 +316,7 @@ export const SUPPORTED_CHAT_MODELS = [
     pricing: {
       inputUsdPerMillionTokens: 0.15,
       outputUsdPerMillionTokens: 0.6,
+      cachedInputUsdPerMillionTokens: 0.0375,
     },
     contextWindow: 1_048_576,
     fallback: "gemini-2.5-pro",

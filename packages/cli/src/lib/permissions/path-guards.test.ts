@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { classifyFsWrite, globToRegex } from "./path-guards";
+import { classifyFsRead, classifyFsWrite, escapesProject, globToRegex } from "./path-guards";
 import { DEFAULT_POLICY } from "./defaults";
 import type { FsRules } from "./types";
 
@@ -49,6 +49,7 @@ describe("classifyFsWrite with synthetic rules", () => {
   const rules: FsRules = {
     allowWrite: ["src/**"],
     denyWrite: ["**/*.pem", "**/secrets/**"],
+    denyRead: [],
   };
 
   test("allows a write under an allowed path", () => {
@@ -73,8 +74,56 @@ describe("classifyFsWrite with synthetic rules", () => {
   });
 });
 
+describe("classifyFsRead", () => {
+  const rules: FsRules = {
+    allowWrite: ["**"],
+    denyWrite: [],
+    denyRead: [".env", "**/.env", "**/*.pem", "**/.ssh/**"],
+  };
+
+  test("allows an ordinary source file", () => {
+    expect(classifyFsRead("src/index.ts", rules).decision).toBe("allow");
+  });
+
+  test("denies a protected file outright rather than prompting", () => {
+    // A prompt is the wrong control for reads: it arrives mid-task with no
+    // context, and gets clicked through.
+    for (const path of [".env", "apps/api/.env", "certs/server.pem", "deploy/.ssh/id_rsa"]) {
+      expect(classifyFsRead(path, rules).decision).toBe("deny");
+    }
+  });
+
+  test("does not over-match on similar names", () => {
+    expect(classifyFsRead("env.example", rules).decision).toBe("allow");
+    expect(classifyFsRead("src/environment.ts", rules).decision).toBe("allow");
+  });
+
+  test("normalizes Windows backslashes", () => {
+    expect(classifyFsRead("deploy\\.ssh\\id_rsa", rules).decision).toBe("deny");
+  });
+});
+
+describe("escapesProject", () => {
+  test("flags absolute, home-relative, and drive-rooted paths", () => {
+    for (const path of ["/etc/passwd", "~/.bashrc", "~", "C:/Windows/system32"]) {
+      expect(escapesProject(path)).toBe(true);
+    }
+  });
+
+  test("flags a path that climbs above the project root", () => {
+    expect(escapesProject("../outside.log")).toBe(true);
+    expect(escapesProject("src/../../outside.log")).toBe(true);
+  });
+
+  test("allows in-project paths, including ones that dip and return", () => {
+    expect(escapesProject("notes.txt")).toBe(false);
+    expect(escapesProject("./src/index.ts")).toBe(false);
+    expect(escapesProject("src/../README.md")).toBe(false);
+  });
+});
+
 describe("classifyFsWrite path normalization", () => {
-  const rules: FsRules = { allowWrite: ["src/**"], denyWrite: [] };
+  const rules: FsRules = { allowWrite: ["src/**"], denyWrite: [], denyRead: [] };
 
   test("normalizes Windows backslashes to forward slashes", () => {
     expect(classifyFsWrite("src\\components\\App.tsx", rules).decision).toBe(

@@ -13,6 +13,18 @@ export type ModeType = (typeof Mode)[keyof typeof Mode];
 export const toolInputSchemas = {
   readFile: z.object({
     path: z.string().describe("Relative path to the file to read"),
+    offset: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe("1-based line number to start reading from. Defaults to 1."),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe("Maximum number of lines to read. Defaults to 2000."),
   }),
   listDirectory: z.object({
     path: z.string().default(".").describe("Relative directory path to list"),
@@ -91,7 +103,10 @@ export const lspToolContracts = {
 
 export const readOnlyToolContracts = {
   readFile: tool({
-    description: "Read a file from the current project directory.",
+    description:
+      "Read a file from the current project directory. Returns up to 2000 lines. " +
+      "If the result is truncated, it reports `nextOffset` — call again with that " +
+      "`offset` to continue reading.",
     inputSchema: toolInputSchemas.readFile,
   }),
   listDirectory: tool({

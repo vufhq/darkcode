@@ -1,11 +1,20 @@
-import { mkdir, readFile, readdir, stat, writeFile } from "fs/promises";
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from "fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { toolInputSchemas, Mode, type ModeType } from "@darkcode/shared";
-import { checkPermission } from "./permissions/engine";
+import { checkPermission, isReadAllowed } from "./permissions/engine";
 import { getLspPool } from "./lsp/pool";
 import { scrubbedBashEnv } from "./scrubbed-env";
 
-const MAX_FILE_SIZE = 10_000;
+// Per-call read ceiling. Generous on purpose: the model needs to see whole
+// source files to reason about them, and `readFile` now takes offset/limit so
+// anything larger is reachable by paging rather than being silently lost.
+// Real cost is bounded downstream by the server's 2MB body limit and the
+// context-window projection in chat.ts.
+const MAX_READ_LINES = 2_000;
+const MAX_READ_CHARS = 400_000;
+// Longest single line we'll echo back before truncating it. Stops a minified
+// bundle from blowing the whole budget on one line.
+const MAX_LINE_CHARS = 2_000;
 const MAX_RESULTS = 200;
 const MAX_MATCHES = 50;
 const MAX_OUTPUT = 20_000;
@@ -16,16 +25,77 @@ const DEFAULT_TIMEOUT = 30_000;
 const MAX_GREP_FILES = 2_000;
 const MAX_GREP_FILE_BYTES = 2_000_000;
 
-function resolveInsideCwd(path: string) {
-  const cwd = process.cwd();
-  const resolved = resolve(cwd, path);
+function assertInside(cwd: string, resolved: string) {
   const rel = relative(cwd, resolved);
-
   if (rel.startsWith("..") || isAbsolute(rel)) {
     throw new Error("Path is outside the project directory");
   }
+  return rel;
+}
 
+// Lexical containment check. `resolve`/`relative` are string operations, so
+// this alone is satisfied by a symlink that points anywhere on disk — see
+// `resolveInsideCwd` below, which is what callers should use.
+function resolveInsideCwdLexical(path: string) {
+  const cwd = process.cwd();
+  const resolved = resolve(cwd, path);
+  assertInside(cwd, resolved);
   return { cwd, resolved };
+}
+
+// Containment check that survives symlinks.
+//
+// The lexical check above passes for `notes/id_rsa` even when `notes` is a
+// symlink to `~/.ssh` — which matters here more than in most programs, because
+// cloning and working inside an untrusted repository is this tool's normal
+// workflow, and a repo can ship a symlink. So we resolve the real path before
+// judging containment, walking up to the nearest existing ancestor for paths
+// that don't exist yet (a file we're about to create).
+//
+// The project root is realpath'd too: if the user's cwd is itself reached
+// through a symlink, comparing a resolved path against an unresolved root
+// would reject every legitimate access.
+async function resolveInsideCwd(path: string) {
+  const cwd = process.cwd();
+  const lexical = resolve(cwd, path);
+  // Fail fast on the obvious cases so a clearly-outside path never touches the
+  // filesystem at all.
+  assertInside(cwd, lexical);
+
+  const realCwd = await realpath(cwd).catch(() => cwd);
+
+  // Find the nearest ancestor that exists and resolve *that*, then re-append
+  // the not-yet-existing tail.
+  let existing = lexical;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      existing = await realpath(existing);
+      break;
+    } catch {
+      const parent = dirname(existing);
+      if (parent === existing) {
+        // Walked to the filesystem root without finding anything real.
+        existing = realCwd;
+        break;
+      }
+      tail.unshift(existing.slice(parent.length + 1));
+      existing = parent;
+    }
+  }
+
+  const resolved = tail.length > 0 ? join(existing, ...tail) : existing;
+  assertInside(realCwd, resolved);
+
+  // Callers report paths relative to the project as the user sees it, so keep
+  // returning the lexical cwd for display purposes.
+  return { cwd, resolved };
+}
+
+// Read-side policy gate. Cheap and synchronous-ish, but it has to happen for
+// every tool that returns file *contents* to the model.
+async function guardRead(cwd: string, resolved: string) {
+  await checkPermission({ kind: "fs-read", projectRelativePath: relative(cwd, resolved) });
 }
 
 function truncate(value: string, limit: number) {
@@ -92,16 +162,62 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
 
   switch (toolName) {
     case "readFile": {
-      const { path } = toolInputSchemas.readFile.parse(input);
-      const { resolved } = resolveInsideCwd(path);
-      const content = await readFile(resolved, "utf-8");
-      return content.length > MAX_FILE_SIZE
-        ? { content: content.slice(0, MAX_FILE_SIZE), truncated: true, totalLength: content.length }
-        : { content };
+      const { path, offset, limit } = toolInputSchemas.readFile.parse(input);
+      const { cwd, resolved } = await resolveInsideCwd(path);
+      await guardRead(cwd, resolved);
+
+      const raw = await readFile(resolved, "utf-8");
+      const allLines = raw.split("\n");
+      // A file ending in a newline splits to a trailing empty element; counting
+      // it would report a 10-line file as 11 and make `nextOffset` point past
+      // the end.
+      if (allLines.length > 1 && allLines[allLines.length - 1] === "") allLines.pop();
+      const totalLines = allLines.length;
+
+      // `offset` is 1-based to match how the model sees line numbers everywhere
+      // else (grep output, LSP ranges, editor references).
+      const start = Math.max(0, (offset ?? 1) - 1);
+      const lineLimit = Math.min(limit ?? MAX_READ_LINES, MAX_READ_LINES);
+
+      const selected: string[] = [];
+      let chars = 0;
+      let charBudgetHit = false;
+      for (const line of allLines.slice(start, start + lineLimit)) {
+        const clipped = line.length > MAX_LINE_CHARS
+          ? `${line.slice(0, MAX_LINE_CHARS)}… (line truncated, ${line.length} chars)`
+          : line;
+        if (chars + clipped.length > MAX_READ_CHARS) {
+          charBudgetHit = true;
+          break;
+        }
+        chars += clipped.length + 1;
+        selected.push(clipped);
+      }
+
+      const nextOffset = start + selected.length + 1;
+      const hasMore = nextOffset <= totalLines;
+
+      return {
+        content: selected.join("\n"),
+        startLine: start + 1,
+        endLine: start + selected.length,
+        totalLines,
+        ...(hasMore
+          ? {
+              truncated: true,
+              nextOffset,
+              // Say plainly how to get the rest — a bare `truncated: true` left
+              // the model with no route to the remainder of the file.
+              hint: charBudgetHit
+                ? `Output size limit reached. Continue with offset: ${nextOffset}.`
+                : `Showing ${selected.length} of ${totalLines} lines. Continue with offset: ${nextOffset}.`,
+            }
+          : {}),
+      };
     }
     case "listDirectory": {
       const { path } = toolInputSchemas.listDirectory.parse(input);
-      const { cwd, resolved } = resolveInsideCwd(path);
+      const { cwd, resolved } = await resolveInsideCwd(path);
       const entries = await readdir(resolved);
       const results: { name: string; type: "file" | "directory" }[] = [];
 
@@ -118,7 +234,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
     }
     case "glob": {
       const { pattern, path } = toolInputSchemas.glob.parse(input);
-      const { cwd, resolved } = resolveInsideCwd(path);
+      const { cwd, resolved } = await resolveInsideCwd(path);
       const glob = new Bun.Glob(pattern);
       const files: string[] = [];
       let truncated = false;
@@ -137,7 +253,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
     }
     case "grep": {
       const { pattern, path, include } = toolInputSchemas.grep.parse(input);
-      const { cwd, resolved } = resolveInsideCwd(path);
+      const { cwd, resolved } = await resolveInsideCwd(path);
 
       // Pure-JS walker rather than shelling out to the Unix `grep` binary,
       // which doesn't exist on a stock Windows install. Bun.Glob enumerates
@@ -154,6 +270,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
       const matches: { file: string; line: number; content: string }[] = [];
       let truncated = false;
       let filesScanned = 0;
+      let skippedProtected = 0;
 
       scan: for await (const rel of glob.scan({ cwd: resolved, dot: false, onlyFiles: true })) {
         if (rel.includes("node_modules") || rel.includes(".git")) continue;
@@ -164,6 +281,14 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
         filesScanned++;
 
         const abs = resolve(resolved, rel);
+        // grep returns matching *lines*, so it's a content read like any other
+        // — a search for `API_KEY` would otherwise exfiltrate every secret in
+        // the tree in one call. Skip protected files rather than aborting the
+        // whole search; the refusal is still audited.
+        if (!isReadAllowed(relative(cwd, abs))) {
+          skippedProtected++;
+          continue;
+        }
         const file = Bun.file(abs);
         if (file.size > MAX_GREP_FILE_BYTES) continue;
 
@@ -189,12 +314,18 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
         }
       }
 
-      if (matches.length === 0) return { matches: [], message: "No matches found" };
-      return { matches, ...(truncated ? { truncated: true } : {}) };
+      const protectedNote =
+        skippedProtected > 0
+          ? { skippedProtectedFiles: skippedProtected }
+          : {};
+      if (matches.length === 0) {
+        return { matches: [], message: "No matches found", ...protectedNote };
+      }
+      return { matches, ...(truncated ? { truncated: true } : {}), ...protectedNote };
     }
     case "writeFile": {
       const { path, content } = toolInputSchemas.writeFile.parse(input);
-      const { cwd, resolved } = resolveInsideCwd(path);
+      const { cwd, resolved } = await resolveInsideCwd(path);
       await checkPermission({ kind: "fs", projectRelativePath: relative(cwd, resolved) });
       await mkdir(dirname(resolved), { recursive: true });
       await writeFile(resolved, content, "utf-8");
@@ -212,7 +343,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
     }
     case "editFile": {
       const { path, oldString, newString } = toolInputSchemas.editFile.parse(input);
-      const { cwd, resolved } = resolveInsideCwd(path);
+      const { cwd, resolved } = await resolveInsideCwd(path);
       await checkPermission({ kind: "fs", projectRelativePath: relative(cwd, resolved) });
       const content = await readFile(resolved, "utf-8");
       const occurrences = content.split(oldString).length - 1;
@@ -245,7 +376,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
         );
       }
       const proc = Bun.spawn([bashPath, "-c", command], {
-        cwd: resolveInsideCwd(".").resolved,
+        cwd: resolveInsideCwdLexical(".").resolved,
         stdout: "pipe",
         stderr: "pipe",
         env: scrubbedBashEnv(),
@@ -265,7 +396,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
     }
     case "lspDefinition": {
       const { path, line, character } = toolInputSchemas.lspDefinition.parse(input);
-      const { resolved } = resolveInsideCwd(path);
+      const { resolved } = await resolveInsideCwd(path);
       const pool = getLspPool();
       const result = await pool.definition(resolved, { line, character });
       if (!result) return { locations: [], message: "No definition found or language server unavailable" };
@@ -280,7 +411,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
     case "lspReferences": {
       const { path, line, character, includeDeclaration } =
         toolInputSchemas.lspReferences.parse(input);
-      const { resolved } = resolveInsideCwd(path);
+      const { resolved } = await resolveInsideCwd(path);
       const pool = getLspPool();
       const result = await pool.references(resolved, { line, character }, includeDeclaration);
       if (!result) return { locations: [], message: "No references found or language server unavailable" };
@@ -295,7 +426,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
     }
     case "lspHover": {
       const { path, line, character } = toolInputSchemas.lspHover.parse(input);
-      const { resolved } = resolveInsideCwd(path);
+      const { resolved } = await resolveInsideCwd(path);
       const pool = getLspPool();
       const result = await pool.hover(resolved, { line, character });
       if (!result) return { content: null, message: "No hover information or language server unavailable" };
@@ -311,7 +442,7 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
     }
     case "lspDiagnostics": {
       const { path } = toolInputSchemas.lspDiagnostics.parse(input);
-      const { resolved } = resolveInsideCwd(path);
+      const { resolved } = await resolveInsideCwd(path);
       const pool = getLspPool();
       const diags = await pool.getDiagnostics(resolved);
       return formatDiagnostics(diags);
