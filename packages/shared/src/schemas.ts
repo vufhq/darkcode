@@ -79,6 +79,27 @@ export const toolInputSchemas = {
   lspDiagnostics: z.object({
     path: z.string().describe("Relative path to the file to get diagnostics for"),
   }),
+  lspSymbols: z.object({
+    query: z
+      .string()
+      .optional()
+      .describe(
+        "Search the whole project for symbols matching this name. Provide either `query` or `path`, not both.",
+      ),
+    path: z
+      .string()
+      .optional()
+      .describe(
+        "Relative path to list every symbol declared in one file. Provide either `query` or `path`, not both.",
+      ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Maximum number of symbols to return. Defaults to 100."),
+  }),
 } as const;
 
 /** LSP tool contracts — available in both PLAN and BUILD modes (read-only). */
@@ -102,6 +123,14 @@ export const lspToolContracts = {
     description:
       "Get language-server diagnostics (errors and warnings) for a file. Useful after edits to check for type errors or syntax problems.",
     inputSchema: toolInputSchemas.lspDiagnostics,
+  }),
+  lspSymbols: tool({
+    description:
+      "Find symbols by name across the project (`query`), or list every symbol declared in one file (`path`). " +
+      "Returns each symbol's kind, enclosing container, file, and position — feed that position straight into " +
+      "lspHover or lspReferences. Prefer this over grep when looking for a declaration: it understands the " +
+      "language, so it finds the definition rather than every mention of the word.",
+    inputSchema: toolInputSchemas.lspSymbols,
   }),
 } as const;
 

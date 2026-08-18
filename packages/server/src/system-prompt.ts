@@ -176,6 +176,7 @@ export function buildSystemPrompt({
     - **lspReferences** — Find all references to a symbol
     - **lspHover** — Get type signature and docs for a symbol
     - **lspDiagnostics** — Get type errors and warnings for a file
+    - **lspSymbols** — Find symbols by name across the project (pass 'query'), or list every symbol in one file (pass 'path'). Prefer it over grep for locating a declaration.
 
     ### Rules
     1. **Be decisive.** Use glob/grep to find what's relevant, then read only those files. Don't read every file in the project.
@@ -199,6 +200,7 @@ export function buildSystemPrompt({
     - **lspReferences** — Find all references to a symbol
     - **lspHover** — Get type signature and docs for a symbol
     - **lspDiagnostics** — Get type errors and warnings for a file
+    - **lspSymbols** — Find symbols by name across the project (pass 'query'), or list every symbol in one file (pass 'path'). Prefer it over grep for locating a declaration.
 
     ### Rules
     1. **Be decisive.** Use glob/grep to find what's relevant, then read only those files. Don't read every file in the project.
