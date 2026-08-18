@@ -37,6 +37,10 @@ export const toolInputSchemas = {
     pattern: z.string().describe("Regex pattern to search for"),
     path: z.string().default(".").describe("Directory to search from"),
     include: z.string().optional().describe("Optional glob for files to include"),
+    ignoreCase: z
+      .boolean()
+      .default(false)
+      .describe("Match case-insensitively. Defaults to false."),
   }),
   writeFile: z.object({
     path: z.string().describe("Relative path to write"),
@@ -119,7 +123,9 @@ export const readOnlyToolContracts = {
   }),
   grep: tool({
     description:
-      "Search file contents with a regular expression under the current project directory.",
+      "Search file contents with a regular expression under the current project directory. " +
+      "Set `ignoreCase` for a case-insensitive search. Files ignored by the project's " +
+      "`.gitignore` are skipped, so build output and dependencies are not searched.",
     inputSchema: toolInputSchemas.grep,
   }),
   ...lspToolContracts,
