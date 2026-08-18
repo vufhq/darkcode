@@ -28,3 +28,17 @@ export {
   type ToolContracts,
   type ModeType,
 } from "./schemas";
+
+export {
+  MAX_INSTRUCTION_FILE_CHARS,
+  MAX_INSTRUCTION_FILES,
+  MAX_INSTRUCTION_TOTAL_CHARS,
+  instructionFileSchema,
+  gitContextSchema,
+  environmentContextSchema,
+  projectContextSchema,
+  type InstructionFile,
+  type GitContext,
+  type EnvironmentContext,
+  type ProjectContext,
+} from "./project-context";

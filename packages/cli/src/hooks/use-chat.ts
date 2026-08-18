@@ -11,6 +11,7 @@ import {
   BYOK_PROVIDERS,
   BYOK_PROVIDER_HEADER,
   type ModeType,
+  type ProjectContext,
   type SupportedChatModelId,
   type ToolContracts,
 } from "@darkcode/shared";
@@ -26,6 +27,7 @@ import {
   type McpToolDescriptor,
 } from "../lib/mcp";
 import { checkPermission, PermissionDeniedError } from "../lib/permissions/engine";
+import { collectProjectContext } from "../lib/project-context";
 
 export type ChatMessageMetadata = {
   mode?: ModeType;
@@ -63,6 +65,27 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
   // re-creating the transport on every discovery.
   const mcpToolsRef = useRef<McpToolDescriptor[]>([]);
   const [, setMcpToolsTick] = useState(0);
+
+  // Machine + project context (cwd, platform, git state, AGENTS.md /
+  // CLAUDE.md). Held in a ref for the same reason as `mcpTools`:
+  // `prepareSendMessagesRequest` is synchronous, so it can only read an
+  // already-resolved value. Refreshed before each user turn so git state stays
+  // current, and deliberately NOT refreshed between tool round-trips within a
+  // turn — the model should see one consistent view of the world per turn.
+  const projectContextRef = useRef<ProjectContext | null>(null);
+
+  const refreshProjectContext = useRef(async () => {
+    try {
+      projectContextRef.current = await collectProjectContext();
+    } catch (error) {
+      // Context is an enhancement, never a precondition for chatting.
+      captureCliException(error, { kind: "project_context" });
+    }
+  }).current;
+
+  useEffect(() => {
+    void refreshProjectContext();
+  }, [refreshProjectContext, sessionId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -132,6 +155,7 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
                   })),
                 }
               : {}),
+            ...(projectContextRef.current ? { projectContext: projectContextRef.current } : {}),
           },
         }
       }
@@ -193,7 +217,11 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
     messages: chat.messages,
     status: chat.status,
     error: chat.error,
-    submit: (params: { userText: string; mode: ModeType; model: SupportedChatModelId }) => {
+    submit: async (params: { userText: string; mode: ModeType; model: SupportedChatModelId }) => {
+      // Re-read the environment before the turn so the model sees the current
+      // branch and working-tree state rather than whatever was true when the
+      // session opened.
+      await refreshProjectContext();
       return chat.sendMessage({
         text: params.userText,
         metadata: {
