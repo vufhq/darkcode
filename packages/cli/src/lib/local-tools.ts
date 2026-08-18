@@ -3,6 +3,8 @@ import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { toolInputSchemas, Mode, type ModeType } from "@darkcode/shared";
 import { checkPermission, isReadAllowed } from "./permissions/engine";
 import { getLspPool } from "./lsp/pool";
+import { pathFromUri } from "./lsp/client";
+import { flattenDocumentSymbols, flattenWorkspaceSymbols } from "./lsp/symbols";
 import { scrubbedBashEnv } from "./scrubbed-env";
 import { applyEdit } from "./apply-edit";
 import { splitBom, splitLines } from "./text";
@@ -108,6 +110,9 @@ function truncate(value: string, limit: number) {
 }
 
 const MAX_DIAGNOSTICS = 10;
+// Default cap on symbols returned per lspSymbols call. A workspace search for
+// a common substring can otherwise return thousands.
+const DEFAULT_SYMBOL_LIMIT = 100;
 
 /** Tools allowed in PLAN mode (read-only, plus LSP which is always read-only). */
 const PLAN_MODE_TOOLS = new Set([
@@ -119,6 +124,7 @@ const PLAN_MODE_TOOLS = new Set([
   "lspReferences",
   "lspHover",
   "lspDiagnostics",
+  "lspSymbols",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -542,6 +548,69 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
       const pool = getLspPool();
       const diags = await pool.getDiagnostics(resolved);
       return formatDiagnostics(diags);
+    }
+    case "lspSymbols": {
+      const { query, path, limit } = toolInputSchemas.lspSymbols.parse(input);
+      if ((query === undefined) === (path === undefined)) {
+        throw new Error("Provide exactly one of `query` (project-wide search) or `path` (one file)");
+      }
+
+      const cwd = process.cwd();
+      const max = limit ?? DEFAULT_SYMBOL_LIMIT;
+      const pool = getLspPool();
+      // LSP hands back `file://` URIs; the model works in project-relative
+      // paths everywhere else, so translate before returning.
+      const toDisplayPath = (uri: string) => relative(cwd, pathFromUri(uri)) || ".";
+
+      if (path !== undefined) {
+        const { resolved } = await resolveInsideCwd(path);
+        await guardRead(cwd, resolved);
+
+        const raw = await pool.documentSymbols(resolved);
+        if (raw === null) {
+          return {
+            symbols: [],
+            message: "No language server is available for this file type.",
+          };
+        }
+        const symbols = flattenDocumentSymbols(raw, { limit: max, toDisplayPath }).map((s) => ({
+          ...s,
+          file: s.file ?? relative(cwd, resolved),
+        }));
+        return {
+          symbols,
+          ...(symbols.length === 0 ? { message: "No symbols found in this file." } : {}),
+          ...(symbols.length >= max ? { truncated: true } : {}),
+        };
+      }
+
+      const result = await pool.workspaceSymbols(query!);
+      if (result === null) {
+        return {
+          symbols: [],
+          message:
+            "No language server is running for this project, so a project-wide symbol search is not available. Use grep instead, or call lspSymbols with a `path`.",
+        };
+      }
+
+      // A workspace search can reach files the read policy protects; drop
+      // those rather than leaking their symbol names.
+      const symbols = flattenWorkspaceSymbols(result.symbols, { toDisplayPath }).filter(
+        (s) => s.file === undefined || isReadAllowed(s.file),
+      );
+      const limited = symbols.slice(0, max);
+
+      // Never let "still indexing" be reported as "does not exist" — that is
+      // the one wrong answer the model would act on with full confidence.
+      const emptyMessage = result.indexWarm
+        ? `No symbols matching "${query}".`
+        : `No symbols matching "${query}" yet — the language server is still indexing this project. Retry shortly, or use grep in the meantime.`;
+
+      return {
+        symbols: limited,
+        ...(limited.length === 0 ? { message: emptyMessage } : {}),
+        ...(symbols.length > max ? { truncated: true } : {}),
+      };
     }
     default:
       throw new Error(`Unknown tool: ${toolName}`);

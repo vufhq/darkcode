@@ -22,10 +22,12 @@ import {
 import type {
   Diagnostic,
   DocumentUri,
+  DocumentSymbol,
   Hover,
   InitializeResult,
   Location,
   Position,
+  SymbolInformation,
 } from "vscode-languageserver-protocol";
 import type { ServerEntry } from "./server-registry";
 
@@ -40,6 +42,8 @@ const Methods = {
   Definition: "textDocument/definition",
   References: "textDocument/references",
   Hover: "textDocument/hover",
+  DocumentSymbol: "textDocument/documentSymbol",
+  WorkspaceSymbol: "workspace/symbol",
   PublishDiagnostics: "textDocument/publishDiagnostics",
 } as const;
 
@@ -129,10 +133,16 @@ export class LspClient {
           definition: { linkSupport: false },
           references: {},
           hover: {},
+          // `hierarchicalDocumentSymbolSupport` asks the server for nested
+          // `DocumentSymbol[]` rather than a flat `SymbolInformation[]`. The
+          // nesting is what lets a result say "method `run` inside class
+          // `Pool`" instead of just "`run`, somewhere".
+          documentSymbol: { hierarchicalDocumentSymbolSupport: true },
           publishDiagnostics: {},
         },
         workspace: {
           workspaceFolders: true,
+          symbol: {},
         },
       },
       workspaceFolders: [{ uri: uriFromPath(workspaceRoot), name: "workspace" }],
@@ -195,6 +205,29 @@ export class LspClient {
       textDocument: { uri },
       position,
     }) as Promise<Hover | null>;
+  }
+
+  /**
+   * Symbols declared in one document.
+   *
+   * Servers may answer with either shape the spec allows: nested
+   * `DocumentSymbol[]` (what we ask for) or flat `SymbolInformation[]` (what
+   * older servers send regardless). Both are returned as-is; normalizing the
+   * two is the caller's job.
+   */
+  async documentSymbols(uri: DocumentUri): Promise<DocumentSymbol[] | SymbolInformation[] | null> {
+    if (!this.conn || !this.initialized) throw new Error("LspClient not initialized");
+    return this.conn.sendRequest(Methods.DocumentSymbol, {
+      textDocument: { uri },
+    }) as Promise<DocumentSymbol[] | SymbolInformation[] | null>;
+  }
+
+  /** Symbols matching a query across the whole workspace. */
+  async workspaceSymbols(query: string): Promise<SymbolInformation[] | null> {
+    if (!this.conn || !this.initialized) throw new Error("LspClient not initialized");
+    return this.conn.sendRequest(Methods.WorkspaceSymbol, { query }) as Promise<
+      SymbolInformation[] | null
+    >;
   }
 
   /**
@@ -310,6 +343,30 @@ export function resolveBinaryPath(command: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Inverse of `uriFromPath`: turn a `file://` URI back into a filesystem path.
+ *
+ * Servers percent-encode URIs, so spaces arrive as `%20` and a path built by
+ * naive string-slicing would not exist on disk. Anything that isn't a
+ * `file://` URI is returned unchanged — better to surface an odd path than to
+ * throw while formatting a result.
+ */
+export function pathFromUri(uri: string): string {
+  if (!uri.startsWith("file://")) return uri;
+
+  let path = uri.slice("file://".length);
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    // Malformed escape — keep the raw form rather than failing the call.
+  }
+
+  // `file:///C:/x` → `C:/x`, while POSIX `file:///home/x` keeps its leading
+  // slash.
+  if (/^\/[A-Za-z]:/.test(path)) path = path.slice(1);
+  return path;
 }
 
 export function uriFromPath(fsPath: string): DocumentUri {
