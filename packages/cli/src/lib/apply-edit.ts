@@ -1,3 +1,4 @@
+import { FALLBACK_REPLACERS } from "./replacers";
 import {
   applyLineEnding,
   detectLineEnding,
@@ -42,7 +43,44 @@ export type ApplyEditResult = {
   content: string;
   /** Whether the file's dominant line ending is CRLF — useful for reporting. */
   crlf: boolean;
+  /**
+   * Which strategy matched. `"exact"` means the model's `oldString` was found
+   * verbatim; anything else means a fallback rescued the edit, which is worth
+   * reporting back so the model can see its quoting drifted.
+   */
+  strategy: string;
 };
+
+/**
+ * Find the one region of `content` a fallback strategy believes `search` meant.
+ *
+ * A candidate is only usable if it occurs exactly once — a strategy that points
+ * at three equally plausible regions has not disambiguated anything. Likewise a
+ * strategy offering several *different* unique candidates is guessing, so it is
+ * skipped rather than allowed to pick one.
+ */
+function findFallbackMatch(
+  content: string,
+  search: string,
+): { match: string; strategy: string } | null {
+  for (const replacer of FALLBACK_REPLACERS) {
+    const usable = new Set<string>();
+
+    for (const candidate of replacer.find(content, search)) {
+      if (candidate === "") continue;
+      if (countOccurrences(content, candidate) === 1) usable.add(candidate);
+      // More than one distinct unique candidate means this strategy cannot
+      // tell them apart; stop collecting and move on to the next one.
+      if (usable.size > 1) break;
+    }
+
+    if (usable.size === 1) {
+      return { match: [...usable][0]!, strategy: replacer.name };
+    }
+  }
+
+  return null;
+}
 
 /**
  * Apply a single exact-match replacement.
@@ -71,27 +109,42 @@ export function applyEdit(raw: string, oldString: string, newString: string): Ap
   const normalizedOld = normalizeNewlines(oldString);
   const normalizedNew = normalizeNewlines(newString);
 
+  // 4. Decide what text is actually being replaced.
+  //
+  //    An exact hit wins outright. An exact hit that occurs more than once is
+  //    reported as ambiguous rather than handed to a fuzzier strategy: if the
+  //    model's text appears three times verbatim, the useful answer is "quote
+  //    more context", not a guess. Only a *miss* opens the fallback chain.
   const occurrences = countOccurrences(normalizedBody, normalizedOld);
-  if (occurrences === 0) throw new Error("oldString not found in file");
   if (occurrences > 1) throw new Error(`oldString is ambiguous; found ${occurrences} matches`);
 
-  // 4. Locate the match in canonical space, then translate those offsets back
+  let matchText = normalizedOld;
+  let strategy = "exact";
+
+  if (occurrences === 0) {
+    const fallback = findFallbackMatch(normalizedBody, normalizedOld);
+    if (!fallback) throw new Error("oldString not found in file");
+    matchText = fallback.match;
+    strategy = fallback.strategy;
+  }
+
+  // 5. Locate the match in canonical space, then translate those offsets back
   //    into the raw string so the splice lands on the original bytes. Editing
   //    the normalized copy and converting the whole file back would rewrite
   //    every line ending in a mixed-ending file — a two-line change arriving
   //    as a whole-file diff.
-  const normalizedStart = normalizedBody.indexOf(normalizedOld);
-  const normalizedEnd = normalizedStart + normalizedOld.length;
+  const normalizedStart = normalizedBody.indexOf(matchText);
+  const normalizedEnd = normalizedStart + matchText.length;
   const rawStart = normalizedIndexToRaw(body, normalizedStart);
   const rawEnd = normalizedIndexToRaw(body, normalizedEnd);
 
-  // 5. Give the replacement the file's own line-ending convention, so inserted
+  // 6. Give the replacement the file's own line-ending convention, so inserted
   //    lines match the ones around them instead of seeding a mixed file.
   const rawNew = applyLineEnding(normalizedNew, ending);
 
-  // 6. Splice by index. Never `String.replace` — see the note on `spliceRange`
+  // 7. Splice by index. Never `String.replace` — see the note on `spliceRange`
   //    for why a `$` in the replacement would otherwise corrupt the write.
   const nextBody = spliceRange(body, rawStart, rawEnd, rawNew);
 
-  return { content: joinBom(nextBody, bom), crlf: ending === "\r\n" };
+  return { content: joinBom(nextBody, bom), crlf: ending === "\r\n", strategy };
 }

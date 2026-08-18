@@ -441,6 +441,17 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
         success: true as const,
         path: relative(cwd, resolved),
       };
+      // Say so when a fallback strategy rescued the edit. Silence here would
+      // teach the model that its near-miss quoting was fine, and it would keep
+      // doing it; worse, a fuzzy match is the one case where the region
+      // replaced might not be the region intended, so the user's agent should
+      // be able to see it happened.
+      if (edited.strategy !== "exact") {
+        editResult["matchedBy"] = edited.strategy;
+        editResult["note"] =
+          `oldString did not match exactly; matched via the '${edited.strategy}' strategy. ` +
+          "Quote the file verbatim to avoid relying on fuzzy matching.";
+      }
       // Post-edit diagnostics feedback loop (BUILD mode only).
       if (mode === Mode.BUILD) {
         const diags = await postEditDiagnostics(resolved);
