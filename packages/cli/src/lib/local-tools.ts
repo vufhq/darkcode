@@ -6,6 +6,7 @@ import { getLspPool } from "./lsp/pool";
 import { scrubbedBashEnv } from "./scrubbed-env";
 import { applyEdit } from "./apply-edit";
 import { splitBom, splitLines } from "./text";
+import { GitignoreMatcher } from "./gitignore";
 
 // Per-call read ceiling. Generous on purpose: the model needs to see whole
 // source files to reason about them, and `readFile` now takes offset/limit so
@@ -123,6 +124,67 @@ const PLAN_MODE_TOOLS = new Set([
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Walk a directory tree yielding project-relative file paths, honouring
+ * `.gitignore` as it descends.
+ *
+ * Written as a recursive walk rather than `Bun.Glob.scan` specifically so that
+ * ignored directories can be *pruned*. A glob scan enumerates the whole tree
+ * and leaves the caller to filter afterwards, which still pays the cost of
+ * walking `node_modules` and `dist`. Pruning is sound here because git cannot
+ * re-include a path whose parent directory is excluded, so nothing reachable
+ * only through an ignored directory can ever be wanted.
+ *
+ * Each directory's own `.gitignore` is loaded on the way in, so nested files
+ * take effect for their subtree and take precedence over shallower ones.
+ */
+async function* walkProjectFiles(
+  root: string,
+  matcher: GitignoreMatcher,
+  relDir = "",
+): AsyncGenerator<string> {
+  const dirAbs = relDir ? join(root, relDir) : root;
+
+  const gitignore = await readFile(join(dirAbs, ".gitignore"), "utf-8").catch(() => null);
+  if (gitignore !== null) matcher.add(relDir, gitignore);
+
+  let entries;
+  try {
+    entries = await readdir(dirAbs, { withFileTypes: true });
+  } catch {
+    return; // unreadable directory — skip rather than abort the whole search
+  }
+
+  // Deterministic order, so repeated searches return matches in the same
+  // sequence and truncation cuts at the same place.
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+
+  for (const entry of entries) {
+    // Hidden entries were already excluded before .gitignore support (the old
+    // scan ran with `dot: false`); keeping that also covers `.git` itself.
+    if (entry.name.startsWith(".")) continue;
+
+    // Symlinks are neither followed nor returned. Following them risks cycles,
+    // and a link can point outside the project entirely.
+    if (entry.isSymbolicLink()) continue;
+
+    const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+
+    if (entry.isDirectory()) {
+      // Belt and braces: a project with no .gitignore at all should still not
+      // have its dependency tree searched.
+      if (entry.name === "node_modules") continue;
+      if (matcher.isIgnored(rel, true)) continue;
+      yield* walkProjectFiles(root, matcher, rel);
+      continue;
+    }
+
+    if (!entry.isFile()) continue;
+    if (matcher.isIgnored(rel, false)) continue;
+    yield rel;
+  }
+}
 
 const SEVERITY_LABEL: Record<number, string> = { 1: "error", 2: "warning", 3: "info", 4: "hint" };
 
@@ -259,28 +321,41 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
       return { files, ...(truncated ? { truncated: true } : {}) };
     }
     case "grep": {
-      const { pattern, path, include } = toolInputSchemas.grep.parse(input);
+      const { pattern, path, include, ignoreCase } = toolInputSchemas.grep.parse(input);
       const { cwd, resolved } = await resolveInsideCwd(path);
 
       // Pure-JS walker rather than shelling out to the Unix `grep` binary,
-      // which doesn't exist on a stock Windows install. Bun.Glob enumerates
-      // candidate files; we read and scan each line ourselves.
+      // which doesn't exist on a stock Windows install. `walkProjectFiles`
+      // enumerates candidate files; we read and scan each line ourselves.
       let regex: RegExp;
       try {
-        regex = new RegExp(pattern);
+        // Only `i` is exposed, rather than letting the model pass arbitrary
+        // flags. `g` in particular would be a correctness bug here: it makes
+        // `RegExp.test` stateful via `lastIndex`, so a reused regex would skip
+        // every other matching line.
+        regex = new RegExp(pattern, ignoreCase ? "i" : "");
       } catch (error) {
         throw new Error(`Invalid grep pattern: ${(error as Error).message}`);
       }
 
-      const scanPattern = include ? `**/${include}` : "**/*";
-      const glob = new Bun.Glob(scanPattern);
+      // `include` historically matched at any depth (`**/<include>`). Test the
+      // bare pattern too so an anchored pattern like `src/*.ts` still works.
+      const includeGlobs = include
+        ? [new Bun.Glob(`**/${include}`), new Bun.Glob(include)]
+        : null;
+
+      const matcher = new GitignoreMatcher();
       const matches: { file: string; line: number; content: string }[] = [];
       let truncated = false;
       let filesScanned = 0;
       let skippedProtected = 0;
 
-      scan: for await (const rel of glob.scan({ cwd: resolved, dot: false, onlyFiles: true })) {
-        if (rel.includes("node_modules") || rel.includes(".git")) continue;
+      scan: for await (const rel of walkProjectFiles(resolved, matcher)) {
+        if (includeGlobs && !includeGlobs.some((g) => g.match(rel))) continue;
+
+        // The budget counts files actually searched. Charging it for files
+        // that were filtered out would let a large `dist/` exhaust the limit
+        // before the search reached any source at all.
         if (filesScanned >= MAX_GREP_FILES) {
           truncated = true;
           break;
