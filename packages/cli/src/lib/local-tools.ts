@@ -4,6 +4,8 @@ import { toolInputSchemas, Mode, type ModeType } from "@darkcode/shared";
 import { checkPermission, isReadAllowed } from "./permissions/engine";
 import { getLspPool } from "./lsp/pool";
 import { scrubbedBashEnv } from "./scrubbed-env";
+import { applyEdit } from "./apply-edit";
+import { splitBom, splitLines } from "./text";
 
 // Per-call read ceiling. Generous on purpose: the model needs to see whole
 // source files to reason about them, and `readFile` now takes offset/limit so
@@ -167,7 +169,12 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
       await guardRead(cwd, resolved);
 
       const raw = await readFile(resolved, "utf-8");
-      const allLines = raw.split("\n");
+      // Show the model the file's *text*, not its encoding artifacts. Splitting
+      // on "\n" alone leaves a trailing `\r` on every line of a CRLF file, and
+      // a BOM shows up as an invisible character at the head of line 1 — both
+      // become stray characters in the model's context that it may then copy
+      // back into an `oldString` or a `writeFile` payload.
+      const allLines = splitLines(splitBom(raw).body);
       // A file ending in a newline splits to a trailing empty element; counting
       // it would report a 10-line file as 11 and make `nextOffset` point past
       // the end.
@@ -299,7 +306,11 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
           continue; // unreadable / binary — skip
         }
 
-        const lines = content.split("\n");
+        // Split on either convention. With a bare `content.split("\n")` every
+        // line of a CRLF file keeps a trailing `\r`, which silently breaks any
+        // `$`-anchored pattern the model writes and ships an invisible control
+        // character back in the match text.
+        const lines = splitLines(content);
         for (let i = 0; i < lines.length; i++) {
           if (!regex.test(lines[i]!)) continue;
           if (matches.length >= MAX_MATCHES) {
@@ -346,12 +357,11 @@ export async function executeLocalTool(toolName: string, input: unknown, mode: M
       const { cwd, resolved } = await resolveInsideCwd(path);
       await checkPermission({ kind: "fs", projectRelativePath: relative(cwd, resolved) });
       const content = await readFile(resolved, "utf-8");
-      const occurrences = content.split(oldString).length - 1;
+      // All the matching and splicing logic lives in `applyEdit`, which is pure
+      // and unit-tested. This branch only does I/O.
+      const edited = applyEdit(content, oldString, newString);
 
-      if (occurrences === 0) throw new Error("oldString not found in file");
-      if (occurrences > 1) throw new Error(`oldString is ambiguous; found ${occurrences} matches`);
-
-      await writeFile(resolved, content.replace(oldString, newString), "utf-8");
+      await writeFile(resolved, edited.content, "utf-8");
       const editResult: Record<string, unknown> = {
         success: true as const,
         path: relative(cwd, resolved),
