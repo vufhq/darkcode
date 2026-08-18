@@ -26,6 +26,7 @@ import {
   isProTierModel,
   Mode,
   modeSchema,
+  projectContextSchema,
   type ModeType,
   type ToolContracts,
 } from "@darkcode/shared";
@@ -108,6 +109,11 @@ const submitSchema = z.object({
   // servers configured omits the field entirely. Capped so a malicious or
   // runaway config can't inject an unbounded tool catalog.
   mcpTools: z.array(mcpToolSchema).max(64).optional(),
+  // Ambient project/machine context gathered CLI-side (cwd, platform, git
+  // state, AGENTS.md / CLAUDE.md). Optional: an older CLI omits it entirely,
+  // and the prompt simply renders without those blocks. Caps live in the
+  // shared schema so both ends agree on them.
+  projectContext: projectContextSchema.optional(),
 });
 
 const submitValidator = zValidator("json", submitSchema, (result, c) => {
@@ -169,7 +175,7 @@ const app = new Hono<AuthenticatedEnv>()
       const userId = c.get("userId");
       const log = c.get("log");
       const requestId = c.get("requestId");
-      const { id, messages, mode, model, mcpTools } = c.req.valid("json");
+      const { id, messages, mode, model, mcpTools, projectContext } = c.req.valid("json");
 
       // Idempotency: optional `Idempotency-Key` header. Two requests from the
       // same user with the same key within the TTL only get processed once.
@@ -434,6 +440,7 @@ const app = new Hono<AuthenticatedEnv>()
         mode,
         model: effectiveModelId,
         compactionSummary: session.compactionSummary,
+        projectContext,
       });
       const projectedTokens = projectNextRequestTokens({
         systemPrompt: builtSystemPromptForProjection,
@@ -529,6 +536,7 @@ const app = new Hono<AuthenticatedEnv>()
           mode,
           model: effectiveModelId,
           compactionSummary: activeCompactionSummary,
+          projectContext,
         }),
         workingMessages: workingMerged,
         incomingMessages: [],
@@ -625,6 +633,7 @@ const app = new Hono<AuthenticatedEnv>()
           mode,
           model: effectiveModelId,
           compactionSummary: activeCompactionSummary,
+          projectContext,
         }),
         messages: modelMessages,
         tools,
