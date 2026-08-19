@@ -25,6 +25,11 @@ const schema = z.object({
   MOONSHOT_API_KEY: NonEmpty,
   MOONSHOT_BASE_URL: z.string().url().default("https://api.moonshot.ai/v1"),
   DARKCODE_BACKING_MODEL: z.string().default("kimi-k2.6"),
+  // Model used for the server-side `webSearch` tool. Must be one that
+  // supports Moonshot's `$web_search` builtin function — kimi-k2.6 (with
+  // thinking enabled) or kimi-k3. Separate from the chat model on purpose:
+  // search runs for every user regardless of which model they chat with.
+  MOONSHOT_SEARCH_MODEL: z.string().default("kimi-k2.6"),
 
   // Hosted provider API keys (optional — used when users don't BYOK)
   ANTHROPIC_API_KEY: Optional,

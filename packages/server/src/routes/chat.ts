@@ -23,6 +23,7 @@ import {
   getModelContextWindow,
   getModelFallbackId,
   getToolContracts,
+  toolInputSchemas,
   isProTierModel,
   Mode,
   modeSchema,
@@ -33,6 +34,7 @@ import {
 } from "@darkcode/shared";
 import { env } from "../lib/env";
 import { buildSystemPrompt } from "../system-prompt";
+import { webSearch } from "../lib/web-search";
 import { compactWorkingContext } from "../lib/compaction";
 import { projectNextRequestTokens, RESPONSE_TOKEN_RESERVE } from "../lib/token-estimate";
 import { safeErrorMessage } from "../lib/safe-error";
@@ -388,7 +390,35 @@ const app = new Hono<AuthenticatedEnv>()
       // ToolSet for runtime use because the MCP set is discovered per-request.
       // This is the set the *model* may call this turn — mode-restricted, so
       // PLAN excludes write/edit/bash.
-      const tools = { ...builtInTools, ...mcpDynamicTools } as unknown as ToolSet;
+      // `webSearch` is the one tool that executes HERE rather than on the CLI.
+      // Everything else needs the user's filesystem or network position; search
+      // needs a provider credential, and MOONSHOT_API_KEY lives on the server
+      // and nowhere else. Attaching `execute` means the AI SDK runs it
+      // in-process and streams the result — the call never reaches the client,
+      // which is why `local-tools.ts` has no case for it.
+      //
+      // Note this works for every model, not just the Moonshot-backed one: a
+      // user on BYOK Anthropic still gets search, because the search is a
+      // separate server-to-Moonshot call rather than a capability of the
+      // conversation's model.
+      const serverExecutedTools = {
+        webSearch: tool({
+          description: builtInTools.webSearch.description,
+          inputSchema: toolInputSchemas.webSearch,
+          execute: async ({ query }: { query: string }) =>
+            webSearch(query, {
+              apiKey: env.MOONSHOT_API_KEY,
+              baseUrl: env.MOONSHOT_BASE_URL,
+              model: env.MOONSHOT_SEARCH_MODEL,
+            }),
+        }),
+      };
+
+      const tools = {
+        ...builtInTools,
+        ...serverExecutedTools,
+        ...mcpDynamicTools,
+      } as unknown as ToolSet;
 
       // Decoding the stored transcript is mode-independent: a session created
       // in BUILD can be continued in PLAN, and its history legitimately holds

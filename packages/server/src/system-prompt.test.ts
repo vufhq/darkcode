@@ -259,6 +259,12 @@ describe("task list block", () => {
     }
   });
 
+  test("advertises webSearch in both modes", () => {
+    for (const mode of [Mode.PLAN, Mode.BUILD] as const) {
+      expect(buildSystemPrompt({ mode })).toContain("**webSearch**");
+    }
+  });
+
   test("advertises webFetch in both modes, with its untrusted-content warning", () => {
     // The warning belongs next to the tool, not only in the tool result — the
     // model decides whether to call it before it ever sees a result.
