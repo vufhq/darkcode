@@ -42,7 +42,11 @@ import type { AuthenticatedEnv } from "../middleware/require-auth";
 import { getAvailableCreditsBalance, hasActiveProSubscription } from "../lib/polar";
 import { ingestAiUsageWithOutbox } from "../lib/polar-outbox";
 import { claimIdempotencyKey } from "../lib/idempotency";
-import { calculateCreditsForUsage, estimateCreditsForProjectedTurn } from "../lib/credits";
+import {
+  calculateCreditsForSearchRounds,
+  calculateCreditsForUsage,
+  estimateCreditsForProjectedTurn,
+} from "../lib/credits";
 import { getPendingCredits, reserveCredits } from "../lib/credit-reservation";
 import { captureException } from "../lib/sentry";
 import { logAuditEvent } from "../lib/audit";
@@ -409,6 +413,11 @@ const app = new Hono<AuthenticatedEnv>()
       // inside `execute` only when the model actually calls the tool.
       let searchRoundsRemaining = env.MOONSHOT_SEARCH_ROUNDS_PER_TURN;
       let searchedThisTurn = new Set<string>();
+      // Billed searches this *request* — metered in onFinish. Per request, not
+      // per turn: a turn spans many requests and each one bills what it spent,
+      // keyed on its own response message id, which makes the ingest naturally
+      // idempotent without any cross-request bookkeeping.
+      let searchRoundsSpent = 0;
 
       const serverExecutedTools = {
         webSearch: tool({
@@ -430,6 +439,29 @@ const app = new Hono<AuthenticatedEnv>()
               );
             }
 
+            // Search always runs against DarkCode's Moonshot account, whatever
+            // model the user is chatting with — so unlike tokens, a depleted
+            // balance has to stop it even on a BYOK turn. Those turns never
+            // fetch a balance (they cost us nothing otherwise), so read it
+            // lazily here: only turns that actually search pay for the call.
+            if (creditsBalance === null && !resolvedModel.isMetered) {
+              try {
+                creditsBalance = await getAvailableCreditsBalance(userId);
+              } catch (error) {
+                // Fail open, matching the gate above: a billing hiccup should
+                // not look to the user like a broken tool.
+                log.warn({ err: error, userId, requestId }, "search_balance_unavailable_fail_open");
+                captureException(error, { userId, requestId, tags: { kind: "polar_balance" } });
+              }
+            }
+            if (creditsBalance !== null && creditsBalance <= 0) {
+              return refuseSearch(
+                query,
+                "Web search needs credits and this account has none left. Run /upgrade to add " +
+                  "credits. webFetch still works if you have a specific URL — it is not billed.",
+              );
+            }
+
             if (searchRoundsRemaining <= 0) {
               return refuseSearch(
                 query,
@@ -446,6 +478,7 @@ const app = new Hono<AuthenticatedEnv>()
               maxRounds: searchRoundsRemaining,
             });
             searchRoundsRemaining -= result.rounds;
+            searchRoundsSpent += result.rounds;
             return result;
           },
         }),
@@ -773,8 +806,8 @@ const app = new Hono<AuthenticatedEnv>()
 
           // Meter BEFORE the pending-tool-call guard below.
           //
-          // No tool contract defines an `execute` — every tool, built-in and
-          // MCP alike, is dispatched client-side — so a turn where the model
+          // Almost no tool contract defines an `execute` — every tool but
+          // `webSearch` is dispatched client-side — so a turn where the model
           // calls a tool ends with that part still pending. In an agentic
           // coding tool that describes *most* turns. Billing after the guard
           // meant a ten-step task charged only for the final text-only turn
@@ -814,6 +847,41 @@ const app = new Hono<AuthenticatedEnv>()
                 requestId,
                 tags: { kind: "polar_credit_calc" },
                 extra: { sessionId: id, messageId: event.responseMessage.id },
+              });
+            }
+          }
+
+          // Web search, metered separately and — unlike tokens —
+          // unconditionally. Search always runs against our Moonshot account,
+          // whatever model the user is chatting with, so `isMetered` (which
+          // asks "did this turn run on our infrastructure") is already true for
+          // it by construction.
+          //
+          // Like the token ingest above, this must happen before the
+          // pending-tool-call guard: the searches were billed to us whether or
+          // not the turn ended cleanly. Keyed on this request's response
+          // message id, so the outbox de-duplicates a retry and each request in
+          // a multi-step turn bills only its own searches.
+          if (searchRoundsSpent > 0) {
+            try {
+              const credits = calculateCreditsForSearchRounds(searchRoundsSpent);
+              if (credits > 0) {
+                await ingestAiUsageWithOutbox({
+                  externalCustomerId: userId,
+                  eventId: `chat-search:${event.responseMessage.id}`,
+                  credits,
+                });
+              }
+            } catch (error) {
+              log.error(
+                { err: error, sessionId: id, messageId: event.responseMessage.id, searchRoundsSpent },
+                "search_credit_ingest_failed",
+              );
+              captureException(error, {
+                userId,
+                requestId,
+                tags: { kind: "polar_search_credit" },
+                extra: { sessionId: id, searchRoundsSpent },
               });
             }
           }
