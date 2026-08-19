@@ -28,6 +28,7 @@ import {
 } from "../lib/mcp";
 import { checkPermission, PermissionDeniedError } from "../lib/permissions/engine";
 import { collectProjectContext } from "../lib/project-context";
+import { getTodos } from "../lib/todos";
 
 export type ChatMessageMetadata = {
   mode?: ModeType;
@@ -139,6 +140,7 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
             : [message];
 
         const mcpTools = mcpToolsRef.current;
+        const todos = getTodos(sessionId);
 
         return {
           body: {
@@ -156,6 +158,11 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
                 }
               : {}),
             ...(projectContextRef.current ? { projectContext: projectContextRef.current } : {}),
+            // Read at send time, not turn start. `todoWrite` runs mid-turn as
+            // a tool call, and the very next request in the same turn must
+            // carry the updated list — otherwise the model would mark a task
+            // in progress and immediately be shown a prompt saying it hadn't.
+            ...(todos.length > 0 ? { todos } : {}),
           },
         }
       }
@@ -182,7 +189,7 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
             });
             return callMcpTool(toolCall.toolName, toolCall.input);
           })()
-        : executeLocalTool(toolCall.toolName, toolCall.input, mode);
+        : executeLocalTool(toolCall.toolName, toolCall.input, mode, sessionId);
 
       void dispatch
         .then((output) =>

@@ -2,7 +2,7 @@ import prettyMs from "pretty-ms";
 import { EmptyBorder } from "../border";
 import { useTheme } from "../../providers/theme";
 import type { Message } from "../../hooks/use-chat";
-import { Mode, getModelDisplayName, type ModeType } from "@darkcode/shared";
+import { Mode, getModelDisplayName, todoListSchema, type ModeType, type Todo } from "@darkcode/shared";
 import { TextAttributes } from "@opentui/core";
 
 type ClientMessagePart = Message["parts"][number];
@@ -40,6 +40,28 @@ function formatToolArgs(tc: ToolPart): string {
   if (typeof tc.input !== "object") return String(tc.input);
   return Object.values(tc.input).map(String).join(" ");
 }
+
+/**
+ * Pull the task list out of a `todoWrite` call for rendering.
+ *
+ * Parsed rather than trusted: `input` is whatever the model streamed, and it
+ * arrives *partial* while the call is still streaming — half an object, or a
+ * `todos` array whose last element has no `status` yet. Validating means the
+ * renderer either gets a well-formed list or falls back to the generic
+ * one-liner, instead of throwing inside a render pass over a half-built object.
+ */
+function parseTodoInput(tc: ToolPart): Todo[] | null {
+  if (!("input" in tc) || tc.input == null || typeof tc.input !== "object") return null;
+  const todos = (tc.input as { todos?: unknown }).todos;
+  const result = todoListSchema.safeParse(todos);
+  return result.success ? result.data : null;
+}
+
+const TODO_GLYPH: Record<Todo["status"], string> = {
+  completed: "✓",
+  in_progress: "▸",
+  pending: "○",
+};
 
 type PartGroup = {
   type: ClientMessagePart["type"];
@@ -116,6 +138,49 @@ export function BotMessage({
             if (isToolPart(part)) {
               const toolName =
                 part.type === "dynamic-tool" ? part.toolName : part.type.slice("tool-".length);
+
+              // The task list is the one tool whose argument *is* the result
+              // worth seeing, so it gets a real rendering rather than the
+              // generic "Tool: arg arg" line — which for this input would
+              // stringify each task object to "[object Object]".
+              const todos = toolName === "todoWrite" ? parseTodoInput(part) : null;
+              if (todos) {
+                return (
+                  <box
+                    key={part.toolCallId}
+                    border={["left"]}
+                    borderColor={colors.thinkingBorder}
+                    customBorderChars={{ ...EmptyBorder, vertical: "│" }}
+                    width="100%"
+                    paddingX={2}
+                  >
+                    <text attributes={TextAttributes.DIM}>
+                      <em fg={colors.info}>Todo:</em>{" "}
+                      {todos.filter((t) => t.status === "completed").length}/{todos.length} done
+                    </text>
+                    {todos.map((todo, k) => (
+                      <text
+                        key={`todo-${part.toolCallId}-${k}`}
+                        attributes={todo.status === "in_progress" ? undefined : TextAttributes.DIM}
+                      >
+                        <em
+                          fg={
+                            todo.status === "completed"
+                              ? colors.success
+                              : todo.status === "in_progress"
+                                ? colors.info
+                                : colors.dimSeparator
+                          }
+                        >
+                          {"  "}
+                          {TODO_GLYPH[todo.status]}
+                        </em>{" "}
+                        {todo.content}
+                      </text>
+                    ))}
+                  </box>
+                );
+              }
 
               return (
                 <box

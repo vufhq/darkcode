@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { buildSystemPrompt } from "./system-prompt";
-import { Mode, type ProjectContext } from "@darkcode/shared";
+import { Mode, type ProjectContext, type Todo } from "@darkcode/shared";
 
 /**
  * `system-prompt.ts` imports only from `@darkcode/shared`, so it can be tested
@@ -197,5 +197,96 @@ describe("interaction with existing prompt sections", () => {
     // appended after them, never in front.
     expect(prompt.indexOf("Identity rules")).toBeLessThan(prompt.indexOf("## Environment"));
     expect(prompt).toContain("Never mention Moonshot");
+  });
+});
+
+describe("task list block", () => {
+  const todo = (content: string, status: Todo["status"] = "pending"): Todo => ({
+    content,
+    status,
+  });
+
+  test("is omitted when no todos are supplied", () => {
+    expect(buildSystemPrompt({ mode: Mode.BUILD })).not.toContain("## Task list");
+    expect(buildSystemPrompt({ mode: Mode.BUILD, todos: null })).not.toContain("## Task list");
+  });
+
+  test("is omitted for an empty list, rather than rendering an empty section", () => {
+    expect(buildSystemPrompt({ mode: Mode.BUILD, todos: [] })).not.toContain("## Task list");
+  });
+
+  test("renders each task with a status marker", () => {
+    const prompt = buildSystemPrompt({
+      mode: Mode.BUILD,
+      todos: [todo("write the parser", "completed"), todo("wire it up", "in_progress"), todo("ship")],
+    });
+    expect(prompt).toContain("- [x] write the parser");
+    expect(prompt).toContain("- [~] wire it up");
+    expect(prompt).toContain("- [ ] ship");
+  });
+
+  test("counts only the unfinished tasks as remaining", () => {
+    const prompt = buildSystemPrompt({
+      mode: Mode.BUILD,
+      todos: [todo("a", "completed"), todo("b", "in_progress"), todo("c")],
+    });
+    expect(prompt).toContain("2 task(s) remain");
+  });
+
+  test("says so plainly when everything is done", () => {
+    // "0 task(s) remain" is the kind of phrasing a model reads past; an
+    // explicit sentence is harder to skim over.
+    const prompt = buildSystemPrompt({
+      mode: Mode.BUILD,
+      todos: [todo("a", "completed"), todo("b", "completed")],
+    });
+    expect(prompt).toContain("Everything on it is done.");
+    expect(prompt).not.toContain("0 task(s) remain");
+  });
+
+  test("tells the model to trust the list over its own memory", () => {
+    // This is the entire point of putting the list in the system prompt: it is
+    // the one part of the plan compaction cannot drop, so it has to be stated
+    // as more reliable than the message history the model can still see.
+    const prompt = buildSystemPrompt({ mode: Mode.BUILD, todos: [todo("a")] });
+    expect(prompt).toContain("survives compaction");
+    expect(prompt).toContain("trust it over your memory");
+  });
+
+  test("appears in both modes", () => {
+    for (const mode of [Mode.PLAN, Mode.BUILD] as const) {
+      expect(buildSystemPrompt({ mode, todos: [todo("a")] })).toContain("## Task list");
+    }
+  });
+
+  test("advertises todoWrite in both modes' tool lists", () => {
+    // PLAN mode can write a task list — it is a plan, not a file write.
+    for (const mode of [Mode.PLAN, Mode.BUILD] as const) {
+      expect(buildSystemPrompt({ mode })).toContain("**todoWrite**");
+    }
+  });
+
+  test("sits after the project instructions and before the compaction digest", () => {
+    const prompt = buildSystemPrompt({
+      mode: Mode.BUILD,
+      projectContext: {
+        environment: baseEnv,
+        instructions: [{ path: "AGENTS.md", content: "INSTRUCTION_MARKER" }],
+      },
+      todos: [todo("a")],
+      compactionSummary: "DIGEST_MARKER",
+    });
+    expect(prompt.indexOf("INSTRUCTION_MARKER")).toBeLessThan(prompt.indexOf("## Task list"));
+    expect(prompt.indexOf("## Task list")).toBeLessThan(prompt.indexOf("DIGEST_MARKER"));
+  });
+
+  test("passes task text through verbatim", () => {
+    // Task text is model-authored and echoed back to the same model, so it is
+    // not escaped — but it must also not be mangled.
+    const prompt = buildSystemPrompt({
+      mode: Mode.BUILD,
+      todos: [todo("fix `applyEdit` for CRLF + BOM (see #8)")],
+    });
+    expect(prompt).toContain("- [ ] fix `applyEdit` for CRLF + BOM (see #8)");
   });
 });

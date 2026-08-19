@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, realpath, stat, writeFile } from "fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "path";
-import { toolInputSchemas, Mode, type ModeType } from "@darkcode/shared";
+import { toolInputSchemas, Mode, summarizeTodos, type ModeType } from "@darkcode/shared";
 import { checkPermission, isReadAllowed } from "./permissions/engine";
 import { getLspPool } from "./lsp/pool";
 import { pathFromUri } from "./lsp/client";
@@ -9,6 +9,7 @@ import { scrubbedBashEnv } from "./scrubbed-env";
 import { applyEdit } from "./apply-edit";
 import { splitBom, splitLines } from "./text";
 import { GitignoreMatcher } from "./gitignore";
+import { assertSingleInProgress, setTodos } from "./todos";
 
 // Per-call read ceiling. Generous on purpose: the model needs to see whole
 // source files to reason about them, and `readFile` now takes offset/limit so
@@ -125,6 +126,9 @@ const PLAN_MODE_TOOLS = new Set([
   "lspHover",
   "lspDiagnostics",
   "lspSymbols",
+  // Not a filesystem write — it records the model's plan. Planning is exactly
+  // when a task list is most useful, so PLAN mode gets it too.
+  "todoWrite",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -225,12 +229,28 @@ async function postEditDiagnostics(absolutePath: string) {
   }
 }
 
-export async function executeLocalTool(toolName: string, input: unknown, mode: ModeType) {
+export async function executeLocalTool(
+  toolName: string,
+  input: unknown,
+  mode: ModeType,
+  sessionId: string,
+) {
   if (mode === Mode.PLAN && !PLAN_MODE_TOOLS.has(toolName)) {
     throw new Error(`Tool ${toolName} is not available in PLAN mode`);
   }
 
   switch (toolName) {
+    case "todoWrite": {
+      const { todos } = toolInputSchemas.todoWrite.parse(input);
+      assertSingleInProgress(todos);
+      setTodos(sessionId, todos);
+
+      // Echo the stored list back. The model just sent it, so this is not new
+      // information — but a tool result that shows what was actually written
+      // is how it learns the write took effect, and the counts give the next
+      // turn a one-line view of progress without re-reading every item.
+      return { todos, ...summarizeTodos(todos) };
+    }
     case "readFile": {
       const { path, offset, limit } = toolInputSchemas.readFile.parse(input);
       const { cwd, resolved } = await resolveInsideCwd(path);
