@@ -80,6 +80,29 @@ export const DEFAULT_POLICY: Policy = {
       "wget **",
     ],
   },
+  web: {
+    // Nothing is pre-approved. The first fetch of a host prompts; "allow
+    // always" writes that host to the project policy under `web.allow`.
+    allow: [],
+    // Cloud instance-metadata endpoints. These are link-local addresses that
+    // hand out short-lived cloud credentials to anything on the box that asks,
+    // with no authentication — they are the single most valuable target
+    // reachable from a machine running an agent, and there is no legitimate
+    // reason for a coding assistant to read one.
+    //
+    // This list is why redirects are re-checked hop by hop in web/fetch.ts: an
+    // allowed host that 302s to 169.254.169.254 would otherwise walk straight
+    // past a rule the user thought was protecting them.
+    deny: [
+      "169.254.169.254",
+      "[fd00:ec2::254]",
+      "metadata.google.internal",
+      "metadata.goog",
+      "100.100.100.200",
+      "metadata.azure.com",
+    ],
+    ask: ["**"],
+  },
   mcp: {
     // Default-ask for every MCP tool. The first call surfaces a permission
     // prompt; "allow always" writes the exact tool name to the project policy

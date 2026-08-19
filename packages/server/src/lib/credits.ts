@@ -151,3 +151,37 @@ export function estimateCreditsForProjectedTurn({
 
   return convertUsdToCredits(estimatedCostUsd);
 }
+
+// ---------------------------------------------------------------------------
+// Web search
+// ---------------------------------------------------------------------------
+
+/**
+ * What Moonshot charges per successful `$web_search` call, in USD.
+ *
+ * Source: https://platform.kimi.ai/docs/pricing/tools — "$0.005, per successful
+ * tool call". Hard-coded because there is no API to read it from; if Moonshot
+ * changes the price, this constant is the one place to change, and
+ * `scripts/smoke-web-search.ts` is the thing that will notice something moved.
+ */
+export const USD_PER_SEARCH = 0.005;
+
+/**
+ * Credits owed for a turn's web searches.
+ *
+ * Metered separately from tokens, and — unlike tokens — metered for *every*
+ * user, BYOK included. The principle the rest of this file follows is that we
+ * bill what runs on our infrastructure: a BYOK turn calls the user's own
+ * provider account, so we don't charge for it. Search never does. It always
+ * runs against DarkCode's Moonshot account, whatever model the user is
+ * chatting with, so leaving it unmetered would mean BYOK users searching
+ * indefinitely on our account.
+ *
+ * Rounded up once per turn rather than per search, which matches how token
+ * billing already rounds: at $0.005 a search and $0.01 a credit, two searches
+ * are exactly one credit, and a lone search costs one.
+ */
+export function calculateCreditsForSearchRounds(rounds: number): number {
+  if (!Number.isFinite(rounds) || rounds <= 0) return 0;
+  return convertUsdToCredits(Math.floor(rounds) * USD_PER_SEARCH);
+}

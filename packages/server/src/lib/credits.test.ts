@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { LanguageModelUsage } from "ai";
 
-import { calculateCreditsForUsage } from "./credits";
+import {
+  USD_PER_SEARCH,
+  calculateCreditsForSearchRounds,
+  calculateCreditsForUsage,
+} from "./credits";
 
 // "darkcode-ai" is the default hosted model. Its pricing (from the shared
 // registry) is $0.60/M input, $2.50/M output. 1 credit = $0.01.
@@ -168,5 +172,51 @@ describe("calculateCreditsForUsage — malformed usage", () => {
       calculateCreditsForUsage({ ...HOSTED, usage: usage(Number.POSITIVE_INFINITY, 5) }),
     ).toThrow();
     expect(() => calculateCreditsForUsage({ ...HOSTED, usage: usage(Number.NaN, 5) })).toThrow();
+  });
+});
+
+describe("calculateCreditsForSearchRounds", () => {
+  test("charges nothing for a turn that ran no searches", () => {
+    expect(calculateCreditsForSearchRounds(0)).toBe(0);
+  });
+
+  test("charges one credit for a single search", () => {
+    // $0.005 against a $0.01 credit rounds up to 1, the same way a tiny token
+    // charge does. Rounding down would make the cheapest search free.
+    expect(calculateCreditsForSearchRounds(1)).toBe(1);
+  });
+
+  test("two searches are exactly one credit", () => {
+    expect(calculateCreditsForSearchRounds(2)).toBe(1);
+  });
+
+  test("rounds up on the half credit", () => {
+    expect(calculateCreditsForSearchRounds(3)).toBe(2); // $0.015
+    expect(calculateCreditsForSearchRounds(4)).toBe(2); // $0.020
+  });
+
+  test("prices the full per-turn budget at four credits", () => {
+    // The default MOONSHOT_SEARCH_ROUNDS_PER_TURN is 8 → $0.04. This is the
+    // most one turn can cost in search, and it is what bounds the unreserved
+    // overrun (search is billed after the fact, not reserved up front).
+    expect(calculateCreditsForSearchRounds(8)).toBe(4);
+  });
+
+  test("tracks the published Moonshot price", () => {
+    // If this constant drifts from platform.kimi.ai/docs/pricing/tools, every
+    // search is mispriced silently — so pin it.
+    expect(USD_PER_SEARCH).toBe(0.005);
+  });
+
+  test("ignores nonsense input rather than throwing mid-turn", () => {
+    // This runs in onFinish, after the response has already streamed; throwing
+    // there loses the charge and logs an error for no benefit.
+    expect(calculateCreditsForSearchRounds(-1)).toBe(0);
+    expect(calculateCreditsForSearchRounds(Number.NaN)).toBe(0);
+    expect(calculateCreditsForSearchRounds(Number.POSITIVE_INFINITY)).toBe(0);
+  });
+
+  test("floors a fractional round count", () => {
+    expect(calculateCreditsForSearchRounds(2.9)).toBe(1);
   });
 });

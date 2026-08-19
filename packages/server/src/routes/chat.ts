@@ -23,6 +23,7 @@ import {
   getModelContextWindow,
   getModelFallbackId,
   getToolContracts,
+  toolInputSchemas,
   isProTierModel,
   Mode,
   modeSchema,
@@ -33,6 +34,7 @@ import {
 } from "@darkcode/shared";
 import { env } from "../lib/env";
 import { buildSystemPrompt } from "../system-prompt";
+import { readTurnSearchUsage, refuseSearch, webSearch } from "../lib/web-search";
 import { compactWorkingContext } from "../lib/compaction";
 import { projectNextRequestTokens, RESPONSE_TOKEN_RESERVE } from "../lib/token-estimate";
 import { safeErrorMessage } from "../lib/safe-error";
@@ -40,7 +42,11 @@ import type { AuthenticatedEnv } from "../middleware/require-auth";
 import { getAvailableCreditsBalance, hasActiveProSubscription } from "../lib/polar";
 import { ingestAiUsageWithOutbox } from "../lib/polar-outbox";
 import { claimIdempotencyKey } from "../lib/idempotency";
-import { calculateCreditsForUsage, estimateCreditsForProjectedTurn } from "../lib/credits";
+import {
+  calculateCreditsForSearchRounds,
+  calculateCreditsForUsage,
+  estimateCreditsForProjectedTurn,
+} from "../lib/credits";
 import { getPendingCredits, reserveCredits } from "../lib/credit-reservation";
 import { captureException } from "../lib/sentry";
 import { logAuditEvent } from "../lib/audit";
@@ -388,7 +394,110 @@ const app = new Hono<AuthenticatedEnv>()
       // ToolSet for runtime use because the MCP set is discovered per-request.
       // This is the set the *model* may call this turn — mode-restricted, so
       // PLAN excludes write/edit/bash.
-      const tools = { ...builtInTools, ...mcpDynamicTools } as unknown as ToolSet;
+      // `webSearch` is the one tool that executes HERE rather than on the CLI.
+      // Everything else needs the user's filesystem or network position; search
+      // needs a provider credential, and MOONSHOT_API_KEY lives on the server
+      // and nowhere else. Attaching `execute` means the AI SDK runs it
+      // in-process and streams the result — the call never reaches the client,
+      // which is why `local-tools.ts` has no case for it.
+      //
+      // Note this works for every model, not just the Moonshot-backed one: a
+      // user on BYOK Anthropic still gets search, because the search is a
+      // separate server-to-Moonshot call rather than a capability of the
+      // conversation's model.
+      // Search spend for THIS turn. Moonshot bills $0.005 per search, a turn
+      // spans many requests (tools are dispatched by the CLI, so each round
+      // trip is a fresh request), and the server keeps no state between them —
+      // so the running total is read back out of the transcript below, once
+      // `workingMerged` is final. Assigned before streaming starts, and read
+      // inside `execute` only when the model actually calls the tool.
+      let searchRoundsRemaining = env.MOONSHOT_SEARCH_ROUNDS_PER_TURN;
+      let searchedThisTurn = new Set<string>();
+      // Billed searches this *request* — metered in onFinish. Per request, not
+      // per turn: a turn spans many requests and each one bills what it spent,
+      // keyed on its own response message id, which makes the ingest naturally
+      // idempotent without any cross-request bookkeeping.
+      let searchRoundsSpent = 0;
+
+      const serverExecutedTools = {
+        webSearch: tool({
+          description: builtInTools.webSearch.description,
+          inputSchema: toolInputSchemas.webSearch,
+          execute: async ({ query }: { query: string }) => {
+            const normalized = query.trim().toLowerCase();
+
+            // Repeating a query verbatim inside one turn buys nothing — the
+            // previous result is still in the transcript the model is reading.
+            // It is also the most common way search spend gets wasted, and it
+            // costs nothing to catch.
+            if (searchedThisTurn.has(normalized)) {
+              return refuseSearch(
+                query,
+                "You already ran this exact search earlier in this turn; its results are above. " +
+                  "Use them, refine the wording if you need something different, or webFetch one " +
+                  "of the sources for detail.",
+              );
+            }
+
+            // Search always runs against DarkCode's Moonshot account, whatever
+            // model the user is chatting with — so unlike tokens, a depleted
+            // balance has to stop it even on a BYOK turn. Those turns never
+            // fetch a balance (they cost us nothing otherwise), so read it
+            // lazily here: only turns that actually search pay for the call.
+            if (creditsBalance === null && !resolvedModel.isMetered) {
+              try {
+                creditsBalance = await getAvailableCreditsBalance(userId);
+              } catch (error) {
+                // Fail open, matching the gate above: a billing hiccup should
+                // not look to the user like a broken tool.
+                log.warn({ err: error, userId, requestId }, "search_balance_unavailable_fail_open");
+                captureException(error, { userId, requestId, tags: { kind: "polar_balance" } });
+              }
+            }
+            if (creditsBalance !== null && creditsBalance <= 0) {
+              return refuseSearch(
+                query,
+                "Web search needs credits and this account has none left. Run /upgrade to add " +
+                  "credits. webFetch still works if you have a specific URL — it is not billed.",
+              );
+            }
+
+            if (searchRoundsRemaining <= 0) {
+              return refuseSearch(
+                query,
+                "The web-search budget for this turn is used up. Work with the results you " +
+                  "already have, or webFetch a specific URL — that is not billed per search.",
+              );
+            }
+
+            searchedThisTurn.add(normalized);
+            const result = await webSearch(query, {
+              apiKey: env.MOONSHOT_API_KEY,
+              baseUrl: env.MOONSHOT_BASE_URL,
+              model: env.MOONSHOT_SEARCH_MODEL,
+              maxRounds: searchRoundsRemaining,
+            });
+            searchRoundsRemaining -= result.rounds;
+            searchRoundsSpent += result.rounds;
+            return result;
+          },
+        }),
+      };
+
+      const tools = {
+        ...builtInTools,
+        ...serverExecutedTools,
+        ...mcpDynamicTools,
+      } as unknown as ToolSet;
+
+      // A zero budget removes the tool from the catalog rather than leaving it
+      // to refuse every call: a tool the model can see is a tool it will try,
+      // and each attempt costs a round trip to learn nothing. Deleted rather
+      // than never added, because `builtInTools` carries the (non-executing)
+      // contract too — it has to be there for transcript decoding.
+      if (env.MOONSHOT_SEARCH_ROUNDS_PER_TURN === 0) {
+        delete (tools as Record<string, unknown>).webSearch;
+      }
 
       // Decoding the stored transcript is mode-independent: a session created
       // in BUILD can be continued in PLAN, and its history legitimately holds
@@ -503,6 +612,15 @@ const app = new Hono<AuthenticatedEnv>()
             extra: { sessionId: id },
           });
         }
+      }
+
+      // Read back what this turn has already spent on search. Done here rather
+      // than at tool-construction time because `workingMerged` is only final
+      // once compaction has had its chance to rewrite it.
+      {
+        const usage = readTurnSearchUsage(workingMerged);
+        searchRoundsRemaining = Math.max(0, env.MOONSHOT_SEARCH_ROUNDS_PER_TURN - usage.rounds);
+        searchedThisTurn = usage.queries;
       }
 
       // Meter the summarizer call for hosted models. Billed here (not in the
@@ -688,8 +806,8 @@ const app = new Hono<AuthenticatedEnv>()
 
           // Meter BEFORE the pending-tool-call guard below.
           //
-          // No tool contract defines an `execute` — every tool, built-in and
-          // MCP alike, is dispatched client-side — so a turn where the model
+          // Almost no tool contract defines an `execute` — every tool but
+          // `webSearch` is dispatched client-side — so a turn where the model
           // calls a tool ends with that part still pending. In an agentic
           // coding tool that describes *most* turns. Billing after the guard
           // meant a ten-step task charged only for the final text-only turn
@@ -729,6 +847,41 @@ const app = new Hono<AuthenticatedEnv>()
                 requestId,
                 tags: { kind: "polar_credit_calc" },
                 extra: { sessionId: id, messageId: event.responseMessage.id },
+              });
+            }
+          }
+
+          // Web search, metered separately and — unlike tokens —
+          // unconditionally. Search always runs against our Moonshot account,
+          // whatever model the user is chatting with, so `isMetered` (which
+          // asks "did this turn run on our infrastructure") is already true for
+          // it by construction.
+          //
+          // Like the token ingest above, this must happen before the
+          // pending-tool-call guard: the searches were billed to us whether or
+          // not the turn ended cleanly. Keyed on this request's response
+          // message id, so the outbox de-duplicates a retry and each request in
+          // a multi-step turn bills only its own searches.
+          if (searchRoundsSpent > 0) {
+            try {
+              const credits = calculateCreditsForSearchRounds(searchRoundsSpent);
+              if (credits > 0) {
+                await ingestAiUsageWithOutbox({
+                  externalCustomerId: userId,
+                  eventId: `chat-search:${event.responseMessage.id}`,
+                  credits,
+                });
+              }
+            } catch (error) {
+              log.error(
+                { err: error, sessionId: id, messageId: event.responseMessage.id, searchRoundsSpent },
+                "search_credit_ingest_failed",
+              );
+              captureException(error, {
+                userId,
+                requestId,
+                tags: { kind: "polar_search_credit" },
+                extra: { sessionId: id, searchRoundsSpent },
               });
             }
           }

@@ -10,6 +10,7 @@ import { applyEdit } from "./apply-edit";
 import { splitBom, splitLines } from "./text";
 import { GitignoreMatcher } from "./gitignore";
 import { assertSingleInProgress, setTodos } from "./todos";
+import { webFetch } from "./web/fetch";
 
 // Per-call read ceiling. Generous on purpose: the model needs to see whole
 // source files to reason about them, and `readFile` now takes offset/limit so
@@ -129,6 +130,10 @@ const PLAN_MODE_TOOLS = new Set([
   // Not a filesystem write — it records the model's plan. Planning is exactly
   // when a task list is most useful, so PLAN mode gets it too.
   "todoWrite",
+  // Read-only with respect to the project. It does reach the network, but the
+  // permission engine gates that per host in both modes, and researching a
+  // library's docs is core planning work.
+  "webFetch",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -240,6 +245,13 @@ export async function executeLocalTool(
   }
 
   switch (toolName) {
+    case "webFetch": {
+      const { url, format, maxChars, timeout } = toolInputSchemas.webFetch.parse(input);
+      // Host approval happens inside `webFetch`, per redirect hop — it cannot
+      // be hoisted here, because the hosts after the first are chosen by the
+      // remote server rather than by the model.
+      return webFetch(url, { format, maxChars, timeoutMs: timeout });
+    }
     case "todoWrite": {
       const { todos } = toolInputSchemas.todoWrite.parse(input);
       assertSingleInProgress(todos);

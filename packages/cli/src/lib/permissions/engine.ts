@@ -1,6 +1,7 @@
 import { classifyBash } from "./bash-classifier";
 import { classifyFsRead, classifyFsWrite } from "./path-guards";
 import { classifyMcpCall } from "./mcp-classifier";
+import { classifyWebRequest } from "./web-classifier";
 import { addProjectRule, loadPolicy } from "./policy";
 import { writeAudit } from "./audit";
 import type {
@@ -51,7 +52,11 @@ type BashOp = { kind: "bash"; command: string };
 type FsWriteOp = { kind: "fs"; projectRelativePath: string };
 type FsReadOp = { kind: "fs-read"; projectRelativePath: string };
 type McpCallOp = { kind: "mcp"; toolName: string; args?: unknown };
-export type GuardedOp = BashOp | FsWriteOp | FsReadOp | McpCallOp;
+// `url` is what the user is shown and what gets audited; `host` is what the
+// policy matches. They are separate fields because a redirect hop is checked
+// with the new host but must still be reported against the URL that caused it.
+type WebOp = { kind: "web"; url: string; host: string };
+export type GuardedOp = BashOp | FsWriteOp | FsReadOp | McpCallOp | WebOp;
 
 // Classify an operation against the loaded policy. Does not consult the
 // user — the engine wraps this with the prompt flow.
@@ -62,6 +67,7 @@ function classify(op: GuardedOp): DecisionOutcome {
   // have to answer to the same policy.
   if (op.kind === "bash") return classifyBash(op.command, policy.bash, policy.fs);
   if (op.kind === "mcp") return classifyMcpCall(op.toolName, policy.mcp);
+  if (op.kind === "web") return classifyWebRequest(op.host, policy.web);
   if (op.kind === "fs-read") return classifyFsRead(op.projectRelativePath, policy.fs);
   return classifyFsWrite(op.projectRelativePath, policy.fs);
 }
@@ -69,12 +75,14 @@ function classify(op: GuardedOp): DecisionOutcome {
 function summary(op: GuardedOp): string {
   if (op.kind === "bash") return op.command;
   if (op.kind === "mcp") return op.toolName;
+  if (op.kind === "web") return op.url;
   return op.projectRelativePath;
 }
 
 function toolName(op: GuardedOp): string {
   if (op.kind === "bash") return "bash";
   if (op.kind === "mcp") return op.toolName;
+  if (op.kind === "web") return "web";
   if (op.kind === "fs-read") return "fs.read";
   return "fs.write";
 }
@@ -88,6 +96,11 @@ function persistAllowAlways(op: GuardedOp): void {
     addProjectRule({ category: "bash", list: "allow", pattern: op.command });
   } else if (op.kind === "mcp") {
     addProjectRule({ category: "mcp", list: "allow", pattern: op.toolName });
+  } else if (op.kind === "web") {
+    // Save the host, not the full URL. "Allow always" on
+    // https://docs.example.com/guide/x means the user trusts the site — one
+    // rule per page read would make the prompt a permanent fixture.
+    addProjectRule({ category: "web", list: "allow", pattern: op.host });
   } else if (op.kind === "fs") {
     addProjectRule({
       category: "fs",
@@ -119,12 +132,16 @@ export function isReadAllowed(projectRelativePath: string): boolean {
 export async function checkPermission(op: GuardedOp): Promise<void> {
   // Posture short-circuits, evaluated before the policy. `yolo` is the
   // explicit override and auto-allows side effects — but never the fs
-  // `denyWrite`/`denyRead` lists (.env, *.pem, **/.ssh/**, …). Overwriting or
-  // exfiltrating secrets is never what a user means by "yolo", so those still
-  // hard-deny. The decision is recorded either way so the audit trail isn't
+  // `denyWrite`/`denyRead` lists (.env, *.pem, **/.ssh/**, …) nor the web
+  // `deny` list (cloud metadata endpoints). Overwriting or exfiltrating
+  // secrets is never what a user means by "yolo", so those still hard-deny. The decision is recorded either way so the audit trail isn't
   // silent.
   if (posture === "yolo") {
-    if (op.kind === "fs" || op.kind === "fs-read") {
+    // `web` joins the fs lists here for the same reason: the default web deny
+    // list is cloud instance-metadata endpoints, which exist to hand out
+    // credentials to whatever asks. "Skip the prompts" is never a request to
+    // read the machine's cloud credentials, so that rule survives yolo too.
+    if (op.kind === "fs" || op.kind === "fs-read" || op.kind === "web") {
       const outcome = classify(op);
       if (outcome.decision === "deny") {
         writeAudit(toolName(op), summary(op), outcome);
