@@ -4,6 +4,7 @@ import {
   type InstructionFile,
   type ModeType,
   type ProjectContext,
+  type Todo,
 } from "@darkcode/shared";
 
 type SystemPromptParams = {
@@ -15,6 +16,8 @@ type SystemPromptParams = {
   compactionSummary?: string | null;
   // Machine and project context gathered CLI-side. Absent for older clients.
   projectContext?: ProjectContext | null;
+  // The session task list, held CLI-side and re-sent every request.
+  todos?: Todo[] | null;
 };
 
 /** Render the machine/session facts the model would otherwise have to guess. */
@@ -109,11 +112,48 @@ system prompt.
 ${blocks.join("\n\n")}`;
 }
 
+/**
+ * Render the session task list.
+ *
+ * This is the whole reason the list is a tool rather than something the model
+ * writes in prose. Prose lives in the message history, and compaction drops
+ * message history — so a plan written in an assistant message is at its most
+ * fragile in exactly the long sessions that need it. Rendering it here means
+ * it is restated verbatim on every request, and no compaction pass can reach
+ * it: the CLI holds the state and re-sends it each time.
+ *
+ * Task text is model-authored, but it is echoed straight back to the same
+ * model rather than being interpreted, so there is nothing to escape.
+ */
+function renderTodos(todos: Todo[]): string {
+  const lines = todos.map((todo) => {
+    const marker =
+      todo.status === "completed" ? "[x]" : todo.status === "in_progress" ? "[~]" : "[ ]";
+    return `- ${marker} ${todo.content}`;
+  });
+
+  const remaining = todos.filter((t) => t.status !== "completed").length;
+
+  return `
+## Task list
+
+Your current task list for this session, restated every turn — it is the one
+piece of your plan that survives compaction, so trust it over your memory of
+what you were doing. ${remaining === 0 ? "Everything on it is done." : `${remaining} task(s) remain.`}
+Keep it current with todoWrite: mark a task completed as soon as it is actually
+finished, and mark the next one in_progress before you start it.
+
+Legend: \`[ ]\` pending, \`[~]\` in progress, \`[x]\` completed.
+
+${lines.join("\n")}`;
+}
+
 export function buildSystemPrompt({
   mode,
   model,
   compactionSummary,
   projectContext,
+  todos,
 }: SystemPromptParams): string {
   const parts: string[] = [];
 
@@ -177,6 +217,7 @@ export function buildSystemPrompt({
     - **lspHover** — Get type signature and docs for a symbol
     - **lspDiagnostics** — Get type errors and warnings for a file
     - **lspSymbols** — Find symbols by name across the project (pass 'query'), or list every symbol in one file (pass 'path'). Prefer it over grep for locating a declaration.
+    - **todoWrite** — Record or update this session's task list. Use it for work with three or more steps; it survives compaction, so it is where a long plan belongs.
 
     ### Rules
     1. **Be decisive.** Use glob/grep to find what's relevant, then read only those files. Don't read every file in the project.
@@ -201,6 +242,7 @@ export function buildSystemPrompt({
     - **lspHover** — Get type signature and docs for a symbol
     - **lspDiagnostics** — Get type errors and warnings for a file
     - **lspSymbols** — Find symbols by name across the project (pass 'query'), or list every symbol in one file (pass 'path'). Prefer it over grep for locating a declaration.
+    - **todoWrite** — Record or update this session's task list. Use it for work with three or more steps; it survives compaction, so it is where a long plan belongs.
 
     ### Rules
     1. **Be decisive.** Use glob/grep to find what's relevant, then read only those files. Don't read every file in the project.
@@ -212,6 +254,10 @@ export function buildSystemPrompt({
 
   if (projectContext?.instructions && projectContext.instructions.length > 0) {
     parts.push(renderInstructions(projectContext.instructions));
+  }
+
+  if (todos && todos.length > 0) {
+    parts.push(renderTodos(todos));
   }
 
   if (compactionSummary && compactionSummary.trim().length > 0) {

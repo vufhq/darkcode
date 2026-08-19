@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { tool } from "ai";
+import { todoListSchema } from "./todos";
 
 export const Mode = {
   BUILD: "BUILD",
@@ -100,6 +101,12 @@ export const toolInputSchemas = {
       .optional()
       .describe("Maximum number of symbols to return. Defaults to 100."),
   }),
+  todoWrite: z.object({
+    todos: todoListSchema.describe(
+      "The complete task list, replacing whatever was there before. Always send every task, " +
+        "including ones already completed — this is a replace, not a merge.",
+    ),
+  }),
 } as const;
 
 /** LSP tool contracts — available in both PLAN and BUILD modes (read-only). */
@@ -156,6 +163,17 @@ export const readOnlyToolContracts = {
       "Set `ignoreCase` for a case-insensitive search. Files ignored by the project's " +
       "`.gitignore` are skipped, so build output and dependencies are not searched.",
     inputSchema: toolInputSchemas.grep,
+  }),
+  todoWrite: tool({
+    description:
+      "Record or update the task list for this session. Send the COMPLETE list every time — it " +
+      "replaces the previous one rather than merging into it. At most one task may be 'in_progress'.\n\n" +
+      "Use it for work with three or more distinct steps, or when the user gives you several things " +
+      "to do at once. Mark a task 'in_progress' before starting it and 'completed' the moment it is " +
+      "actually done — not when you intend to do it.\n\n" +
+      "There is no tool to read the list back: the current list is restated in your system prompt on " +
+      "every request, so it is already in front of you.",
+    inputSchema: toolInputSchemas.todoWrite,
   }),
   ...lspToolContracts,
 } as const;

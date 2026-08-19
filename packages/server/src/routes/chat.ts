@@ -27,6 +27,7 @@ import {
   Mode,
   modeSchema,
   projectContextSchema,
+  todoListSchema,
   type ModeType,
   type ToolContracts,
 } from "@darkcode/shared";
@@ -114,6 +115,9 @@ const submitSchema = z.object({
   // and the prompt simply renders without those blocks. Caps live in the
   // shared schema so both ends agree on them.
   projectContext: projectContextSchema.optional(),
+  // Session task list, owned and re-sent by the CLI. The server is stateless
+  // and only renders it into the system prompt.
+  todos: todoListSchema.optional(),
 });
 
 const submitValidator = zValidator("json", submitSchema, (result, c) => {
@@ -175,7 +179,7 @@ const app = new Hono<AuthenticatedEnv>()
       const userId = c.get("userId");
       const log = c.get("log");
       const requestId = c.get("requestId");
-      const { id, messages, mode, model, mcpTools, projectContext } = c.req.valid("json");
+      const { id, messages, mode, model, mcpTools, projectContext, todos } = c.req.valid("json");
 
       // Idempotency: optional `Idempotency-Key` header. Two requests from the
       // same user with the same key within the TTL only get processed once.
@@ -441,6 +445,7 @@ const app = new Hono<AuthenticatedEnv>()
         model: effectiveModelId,
         compactionSummary: session.compactionSummary,
         projectContext,
+        todos,
       });
       const projectedTokens = projectNextRequestTokens({
         systemPrompt: builtSystemPromptForProjection,
@@ -537,6 +542,7 @@ const app = new Hono<AuthenticatedEnv>()
           model: effectiveModelId,
           compactionSummary: activeCompactionSummary,
           projectContext,
+          todos,
         }),
         workingMessages: workingMerged,
         incomingMessages: [],
@@ -634,6 +640,7 @@ const app = new Hono<AuthenticatedEnv>()
           model: effectiveModelId,
           compactionSummary: activeCompactionSummary,
           projectContext,
+          todos,
         }),
         messages: modelMessages,
         tools,
