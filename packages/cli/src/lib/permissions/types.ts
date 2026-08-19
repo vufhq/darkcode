@@ -32,10 +32,20 @@ export type McpRules = {
   ask: string[];
 };
 
+// Web rules match against a URL's host (`example.com`, `localhost:3000`).
+// `*.example.com` matches subdomains; `**` matches every host. See
+// web-classifier.ts.
+export type WebRules = {
+  allow: string[];
+  deny: string[];
+  ask: string[];
+};
+
 export type Policy = {
   bash: BashRules;
   fs: FsRules;
   mcp: McpRules;
+  web: WebRules;
 };
 
 export type Decision = "allow" | "deny" | "ask";
@@ -53,6 +63,7 @@ export type DecisionOutcome = {
 export type PermissionRequest = {
   tool: string;
   // For bash: the raw command. For fs: the resolved project-relative path.
+  // For web: the URL.
   summary: string;
   reason: string;
 };
