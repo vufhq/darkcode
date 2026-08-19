@@ -50,13 +50,28 @@
 const SEARCH_TOOL_NAME = "$web_search";
 
 /**
- * Search rounds before giving up.
+ * Search rounds one `webSearch` call may run before giving up.
  *
- * Each round is a billed search on Moonshot's side, so this is a cost ceiling
- * as much as a loop guard: a model that keeps refining its query would
- * otherwise spend real money without anyone deciding to.
+ * Moonshot bills **$0.005 per successful search**, on top of tokens. That is
+ * not a rounding error next to the model call it accompanies: at kimi-k2.6
+ * input pricing, a single search costs about what 5k input tokens do, and a
+ * four-round call costs about what a whole ordinary turn does. So this is a
+ * spend ceiling first and a loop guard second.
  */
 export const MAX_SEARCH_ROUNDS = 4;
+
+/**
+ * Billed searches allowed across one user turn, spanning every `webSearch`
+ * call the model makes while working on it.
+ *
+ * `MAX_SEARCH_ROUNDS` bounds a single call; it does not bound a turn, because
+ * tools are dispatched by the CLI and each round trip is a fresh request. A
+ * model that decided to search after every step would spend without limit and
+ * without anyone choosing to. Eight rounds — $0.04 at current pricing — leaves
+ * room for genuine research (search, refine, follow a lead) while making a
+ * runaway loop impossible.
+ */
+export const DEFAULT_SEARCH_ROUNDS_PER_TURN = 8;
 export const SEARCH_TIMEOUT_MS = 60_000;
 /** Ceiling on the answer handed back to the model. */
 export const MAX_ANSWER_CHARS = 20_000;
@@ -128,6 +143,11 @@ export type WebSearchConfig = {
   baseUrl: string;
   /** Must support `$web_search`: kimi-k2.6 (thinking enabled) or kimi-k3. */
   model: string;
+  /**
+   * Rounds this call may spend, when the caller is enforcing a turn-wide
+   * budget. Clamped to `MAX_SEARCH_ROUNDS`.
+   */
+  maxRounds?: number;
   /** Injected so the loop can be tested without calling Moonshot. */
   fetchImpl?: typeof fetch;
 };
@@ -140,6 +160,7 @@ export async function webSearch(query: string, config: WebSearchConfig): Promise
   const apiKey = config.apiKey;
   const baseUrl = config.baseUrl.replace(/\/+$/, "");
   const model = config.model;
+  const maxRounds = Math.max(1, Math.min(config.maxRounds ?? MAX_SEARCH_ROUNDS, MAX_SEARCH_ROUNDS));
 
   const messages: ChatMessage[] = [
     { role: "system", content: SEARCH_SYSTEM_PROMPT },
@@ -152,7 +173,7 @@ export async function webSearch(query: string, config: WebSearchConfig): Promise
   try {
     let rounds = 0;
 
-    for (let attempt = 0; attempt <= MAX_SEARCH_ROUNDS; attempt++) {
+    for (let attempt = 0; attempt <= maxRounds; attempt++) {
       const response = await fetchImpl(`${baseUrl}/chat/completions`, {
         method: "POST",
         signal: controller.signal,
@@ -220,7 +241,7 @@ export async function webSearch(query: string, config: WebSearchConfig): Promise
     }
 
     throw new Error(
-      `Web search did not converge after ${MAX_SEARCH_ROUNDS} rounds for query: ${trimmed}`,
+      `Web search did not converge after ${maxRounds} round(s) for query: ${trimmed}`,
     );
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
@@ -230,4 +251,91 @@ export async function webSearch(query: string, config: WebSearchConfig): Promise
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Per-turn accounting
+// ---------------------------------------------------------------------------
+
+/**
+ * What a turn has already spent on search, read back out of the transcript.
+ *
+ * The server is stateless between requests, and a single user turn spans many
+ * of them — tools are dispatched by the CLI, so every tool round trip is a new
+ * HTTP request. There is therefore nowhere to keep a running total except the
+ * conversation itself, which is fine, because the conversation is exactly
+ * where the evidence lives: each completed `webSearch` result records how many
+ * rounds it actually ran.
+ *
+ * "This turn" means everything after the last user message. Note that a
+ * compaction pass could in principle drop part of it, which would under-count;
+ * in practice compaction snaps its cutoff back to a user-message boundary, so
+ * the current turn stays intact.
+ */
+export type TurnSearchUsage = {
+  /** Billed rounds already spent this turn. */
+  rounds: number;
+  /** Queries already searched this turn, lowercased and trimmed. */
+  queries: Set<string>;
+};
+
+type TranscriptPart = {
+  type?: string;
+  state?: string;
+  input?: unknown;
+  output?: unknown;
+};
+
+type TranscriptMessage = { role?: string; parts?: TranscriptPart[] };
+
+export function readTurnSearchUsage(messages: readonly TranscriptMessage[]): TurnSearchUsage {
+  let start = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user") {
+      start = i;
+      break;
+    }
+  }
+
+  const usage: TurnSearchUsage = { rounds: 0, queries: new Set() };
+
+  for (let i = start; i < messages.length; i++) {
+    for (const part of messages[i]?.parts ?? []) {
+      if (part.type !== "tool-webSearch") continue;
+
+      const query = (part.input as { query?: unknown } | undefined)?.query;
+      if (typeof query === "string" && query.trim()) {
+        usage.queries.add(query.trim().toLowerCase());
+      }
+
+      if (part.state !== "output-available") continue;
+      const rounds = (part.output as { rounds?: unknown } | undefined)?.rounds;
+      // A search that ran zero rounds — the model answered from what it knew —
+      // costs nothing and must not consume budget.
+      if (typeof rounds === "number" && Number.isFinite(rounds) && rounds > 0) {
+        usage.rounds += rounds;
+      }
+    }
+  }
+
+  return usage;
+}
+
+/** Structured refusal, returned instead of thrown. */
+export type WebSearchRefusal = {
+  query: string;
+  refused: true;
+  reason: string;
+};
+
+/**
+ * Returned rather than thrown on purpose.
+ *
+ * A thrown tool error reads to the model as "that call failed", and the
+ * reasonable response to a failure is to try again — which is precisely the
+ * behaviour a spend cap exists to prevent. A successful result that says "no
+ * more searches this turn, here is what to do instead" is unambiguous.
+ */
+export function refuseSearch(query: string, reason: string): WebSearchRefusal {
+  return { query, refused: true, reason };
 }

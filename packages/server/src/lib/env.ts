@@ -30,6 +30,11 @@ const schema = z.object({
   // thinking enabled) or kimi-k3. Separate from the chat model on purpose:
   // search runs for every user regardless of which model they chat with.
   MOONSHOT_SEARCH_MODEL: z.string().default("kimi-k2.6"),
+  // Billed searches allowed across one user turn. Moonshot charges $0.005
+  // per successful search on top of tokens, and a turn spans many requests,
+  // so without this there is no ceiling at all. Set to 0 to disable the
+  // webSearch tool entirely.
+  MOONSHOT_SEARCH_ROUNDS_PER_TURN: z.coerce.number().int().min(0).max(50).default(8),
 
   // Hosted provider API keys (optional — used when users don't BYOK)
   ANTHROPIC_API_KEY: Optional,

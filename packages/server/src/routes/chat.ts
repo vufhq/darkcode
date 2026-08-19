@@ -34,7 +34,7 @@ import {
 } from "@darkcode/shared";
 import { env } from "../lib/env";
 import { buildSystemPrompt } from "../system-prompt";
-import { webSearch } from "../lib/web-search";
+import { readTurnSearchUsage, refuseSearch, webSearch } from "../lib/web-search";
 import { compactWorkingContext } from "../lib/compaction";
 import { projectNextRequestTokens, RESPONSE_TOKEN_RESERVE } from "../lib/token-estimate";
 import { safeErrorMessage } from "../lib/safe-error";
@@ -401,16 +401,53 @@ const app = new Hono<AuthenticatedEnv>()
       // user on BYOK Anthropic still gets search, because the search is a
       // separate server-to-Moonshot call rather than a capability of the
       // conversation's model.
+      // Search spend for THIS turn. Moonshot bills $0.005 per search, a turn
+      // spans many requests (tools are dispatched by the CLI, so each round
+      // trip is a fresh request), and the server keeps no state between them —
+      // so the running total is read back out of the transcript below, once
+      // `workingMerged` is final. Assigned before streaming starts, and read
+      // inside `execute` only when the model actually calls the tool.
+      let searchRoundsRemaining = env.MOONSHOT_SEARCH_ROUNDS_PER_TURN;
+      let searchedThisTurn = new Set<string>();
+
       const serverExecutedTools = {
         webSearch: tool({
           description: builtInTools.webSearch.description,
           inputSchema: toolInputSchemas.webSearch,
-          execute: async ({ query }: { query: string }) =>
-            webSearch(query, {
+          execute: async ({ query }: { query: string }) => {
+            const normalized = query.trim().toLowerCase();
+
+            // Repeating a query verbatim inside one turn buys nothing — the
+            // previous result is still in the transcript the model is reading.
+            // It is also the most common way search spend gets wasted, and it
+            // costs nothing to catch.
+            if (searchedThisTurn.has(normalized)) {
+              return refuseSearch(
+                query,
+                "You already ran this exact search earlier in this turn; its results are above. " +
+                  "Use them, refine the wording if you need something different, or webFetch one " +
+                  "of the sources for detail.",
+              );
+            }
+
+            if (searchRoundsRemaining <= 0) {
+              return refuseSearch(
+                query,
+                "The web-search budget for this turn is used up. Work with the results you " +
+                  "already have, or webFetch a specific URL — that is not billed per search.",
+              );
+            }
+
+            searchedThisTurn.add(normalized);
+            const result = await webSearch(query, {
               apiKey: env.MOONSHOT_API_KEY,
               baseUrl: env.MOONSHOT_BASE_URL,
               model: env.MOONSHOT_SEARCH_MODEL,
-            }),
+              maxRounds: searchRoundsRemaining,
+            });
+            searchRoundsRemaining -= result.rounds;
+            return result;
+          },
         }),
       };
 
@@ -419,6 +456,15 @@ const app = new Hono<AuthenticatedEnv>()
         ...serverExecutedTools,
         ...mcpDynamicTools,
       } as unknown as ToolSet;
+
+      // A zero budget removes the tool from the catalog rather than leaving it
+      // to refuse every call: a tool the model can see is a tool it will try,
+      // and each attempt costs a round trip to learn nothing. Deleted rather
+      // than never added, because `builtInTools` carries the (non-executing)
+      // contract too — it has to be there for transcript decoding.
+      if (env.MOONSHOT_SEARCH_ROUNDS_PER_TURN === 0) {
+        delete (tools as Record<string, unknown>).webSearch;
+      }
 
       // Decoding the stored transcript is mode-independent: a session created
       // in BUILD can be continued in PLAN, and its history legitimately holds
@@ -533,6 +579,15 @@ const app = new Hono<AuthenticatedEnv>()
             extra: { sessionId: id },
           });
         }
+      }
+
+      // Read back what this turn has already spent on search. Done here rather
+      // than at tool-construction time because `workingMerged` is only final
+      // once compaction has had its chance to rewrite it.
+      {
+        const usage = readTurnSearchUsage(workingMerged);
+        searchRoundsRemaining = Math.max(0, env.MOONSHOT_SEARCH_ROUNDS_PER_TURN - usage.rounds);
+        searchedThisTurn = usage.queries;
       }
 
       // Meter the summarizer call for hosted models. Billed here (not in the

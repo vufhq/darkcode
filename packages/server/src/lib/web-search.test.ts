@@ -4,6 +4,8 @@ import {
   MAX_ANSWER_CHARS,
   MAX_SEARCH_ROUNDS,
   extractSources,
+  readTurnSearchUsage,
+  refuseSearch,
   webSearch,
   type WebSearchConfig,
 } from "./web-search";
@@ -270,5 +272,116 @@ describe("failures", () => {
     };
     const fake = scriptedFetch([payload]);
     expect((await webSearch("q", config(fake.impl))).answer).toBe("Answered directly.");
+  });
+});
+
+describe("readTurnSearchUsage", () => {
+  const search = (query: string, rounds?: number) => ({
+    type: "tool-webSearch",
+    state: rounds === undefined ? "input-available" : "output-available",
+    input: { query },
+    ...(rounds === undefined ? {} : { output: { rounds } }),
+  });
+
+  test("counts nothing for an empty transcript", () => {
+    expect(readTurnSearchUsage([])).toEqual({ rounds: 0, queries: new Set() });
+  });
+
+  test("sums the rounds actually billed, not the number of calls", () => {
+    // A call that ran three rounds cost three searches. Counting calls would
+    // undercharge the budget by exactly the amount that matters.
+    const usage = readTurnSearchUsage([
+      { role: "user", parts: [{ type: "text" }] },
+      { role: "assistant", parts: [search("a", 3), search("b", 1)] },
+    ]);
+    expect(usage.rounds).toBe(4);
+  });
+
+  test("ignores everything before the last user message", () => {
+    // The budget is per turn. Spend from an earlier turn is already paid for
+    // and must not eat into this one.
+    const usage = readTurnSearchUsage([
+      { role: "user", parts: [] },
+      { role: "assistant", parts: [search("old", 4)] },
+      { role: "user", parts: [] },
+      { role: "assistant", parts: [search("new", 1)] },
+    ]);
+    expect(usage.rounds).toBe(1);
+    expect(usage.queries.has("old")).toBe(false);
+    expect(usage.queries.has("new")).toBe(true);
+  });
+
+  test("does not charge for a call that ran zero rounds", () => {
+    // The model answered from what it knew; Moonshot billed nothing.
+    expect(readTurnSearchUsage([{ role: "assistant", parts: [search("q", 0)] }]).rounds).toBe(0);
+  });
+
+  test("ignores a call that has not produced output yet", () => {
+    expect(readTurnSearchUsage([{ role: "assistant", parts: [search("pending")] }]).rounds).toBe(0);
+  });
+
+  test("still records the query of an in-flight call, for deduplication", () => {
+    const usage = readTurnSearchUsage([{ role: "assistant", parts: [search("pending")] }]);
+    expect(usage.queries.has("pending")).toBe(true);
+  });
+
+  test("normalizes queries so case and spacing do not defeat deduplication", () => {
+    const usage = readTurnSearchUsage([
+      { role: "assistant", parts: [search("  Latest Bun Release  ", 1)] },
+    ]);
+    expect(usage.queries.has("latest bun release")).toBe(true);
+  });
+
+  test("ignores other tools' parts", () => {
+    const usage = readTurnSearchUsage([
+      {
+        role: "assistant",
+        parts: [
+          { type: "tool-webFetch", state: "output-available", output: { rounds: 99 } },
+          { type: "text" },
+        ],
+      },
+    ]);
+    expect(usage.rounds).toBe(0);
+  });
+
+  test("survives malformed output rather than throwing mid-request", () => {
+    const usage = readTurnSearchUsage([
+      {
+        role: "assistant",
+        parts: [
+          { type: "tool-webSearch", state: "output-available", output: null },
+          { type: "tool-webSearch", state: "output-available", output: { rounds: "three" } },
+          { type: "tool-webSearch", state: "output-available", output: { rounds: Number.NaN } },
+        ],
+      },
+    ]);
+    expect(usage.rounds).toBe(0);
+  });
+});
+
+describe("per-call round budget", () => {
+  test("stops at the caller's budget, below the per-call ceiling", async () => {
+    const fake = scriptedFetch([searchCallResponse("c", "{}")]);
+    await expect(webSearch("q", { ...config(fake.impl), maxRounds: 2 })).rejects.toThrow(
+      /did not converge/,
+    );
+    expect(fake.calls).toBe(3); // 2 rounds + the attempt that would have been the third
+  });
+
+  test("cannot be raised above the per-call ceiling", async () => {
+    const fake = scriptedFetch([searchCallResponse("c", "{}")]);
+    await expect(webSearch("q", { ...config(fake.impl), maxRounds: 999 })).rejects.toThrow();
+    expect(fake.calls).toBe(MAX_SEARCH_ROUNDS + 1);
+  });
+});
+
+describe("refuseSearch", () => {
+  test("returns a result rather than throwing", () => {
+    // A thrown tool error reads to the model as "that failed", and the
+    // reasonable response to a failure is to retry — which is exactly what a
+    // spend cap exists to prevent.
+    const refusal = refuseSearch("q", "budget used up");
+    expect(refusal).toEqual({ query: "q", refused: true, reason: "budget used up" });
   });
 });
