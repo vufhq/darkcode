@@ -67,7 +67,8 @@ bool sendRequest(const std::string& method,
                  Handle& session,
                  Handle& connect,
                  Handle& request,
-                 std::string& error) {
+                 std::string& error,
+                 bool followRedirects = true) {
     session.reset(::WinHttpOpen(L"DarkCode-Desktop/1.0",
                                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                 WINHTTP_NO_PROXY_NAME,
@@ -99,6 +100,11 @@ bool sendRequest(const std::string& method,
     if (!request) {
         error = lastErrorMessage("WinHttpOpenRequest");
         return false;
+    }
+
+    if (!followRedirects) {
+        DWORD disable = WINHTTP_DISABLE_REDIRECTS;
+        ::WinHttpSetOption(request.get(), WINHTTP_OPTION_DISABLE_FEATURE, &disable, sizeof(disable));
     }
 
     std::wstring headerBlock;
@@ -144,6 +150,21 @@ long queryStatus(HINTERNET request) {
         return 0;
     }
     return static_cast<long>(status);
+}
+
+std::string queryHeader(HINTERNET request, const wchar_t* name) {
+    DWORD size = 0;
+    ::WinHttpQueryHeaders(request, WINHTTP_QUERY_CUSTOM, name, WINHTTP_NO_OUTPUT_BUFFER, &size,
+                          WINHTTP_NO_HEADER_INDEX);
+    if (::GetLastError() != ERROR_INSUFFICIENT_BUFFER || size == 0) return {};
+
+    std::wstring buffer(size / sizeof(wchar_t), L'\0');
+    if (!::WinHttpQueryHeaders(request, WINHTTP_QUERY_CUSTOM, name, buffer.data(), &size,
+                               WINHTTP_NO_HEADER_INDEX)) {
+        return {};
+    }
+    buffer.resize(wcslen(buffer.c_str()));
+    return toUtf8(buffer);
 }
 
 /// Drains the response. `sink` may be null, in which case everything is
@@ -231,6 +252,47 @@ HttpResult httpStream(const std::string& method,
     bool aborted = false;
     readBody(request.get(), streaming ? &sink : nullptr, result.body, aborted, result.error);
     result.aborted = aborted;
+    return result;
+}
+
+HttpFetchResult httpFetchOnce(const std::string& url,
+                              const HttpHeaders& headers,
+                              int timeoutMs,
+                              size_t maxBytes) {
+    HttpFetchResult result;
+
+    const ParsedUrl parsed = parseUrl(url);
+    if (!parsed.valid) {
+        result.error = "Not a valid absolute URL: " + url;
+        return result;
+    }
+
+    Handle session, connect, request;
+    if (!sendRequest("GET", parsed, headers, std::string(), timeoutMs, session, connect, request,
+                     result.error, /*followRedirects=*/false)) {
+        return result;
+    }
+
+    result.status = queryStatus(request.get());
+    result.contentType = toLower(queryHeader(request.get(), L"Content-Type"));
+    result.location = queryHeader(request.get(), L"Location");
+
+    // Count what actually arrives rather than trusting Content-Length.
+    bool aborted = false;
+    std::string error;
+    const StreamSink sink = [&](const char* data, size_t length) {
+        const size_t remaining = maxBytes > result.body.size() ? maxBytes - result.body.size() : 0;
+        if (length >= remaining) {
+            result.body.append(data, remaining);
+            result.truncated = true;
+            return false; // stop reading
+        }
+        result.body.append(data, length);
+        return true;
+    };
+    readBody(request.get(), &sink, result.body, aborted, error);
+    if (!error.empty() && result.body.empty()) result.error = error;
+
     return result;
 }
 

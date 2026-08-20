@@ -76,6 +76,7 @@ std::string toolSummary(const ToolCall& tool) {
         return str("pattern") + (where.empty() || where == "." ? "" : "  in " + where);
     }
     if (tool.toolName == "glob") return str("pattern");
+    if (tool.toolName == "webFetch") return str("url");
     if (tool.toolName == "todoWrite") {
         if (input.is_object() && input.contains("todos") && input["todos"].is_array()) {
             return std::to_string(input["todos"].size()) + " tasks";
@@ -121,6 +122,14 @@ std::string toolResultPreview(const ToolCall& tool) {
         std::string summary = "exit " + std::to_string(exitCode);
         const std::string body = !out.empty() ? out : err;
         if (!body.empty()) summary += "  " + splitLines(body).front();
+        return summary;
+    }
+    if (tool.toolName == "webFetch") {
+        const std::string format = output.value("format", std::string());
+        const std::string title = output.value("title", std::string());
+        std::string summary = std::to_string(output.value("status", 0)) + " " + format + ", " +
+                              humanBytes(static_cast<long long>(output.value("content", std::string()).size()));
+        if (!title.empty()) summary += "  " + title;
         return summary;
     }
     if (output.contains("bytesWritten")) {
@@ -730,7 +739,10 @@ void App::drawPermissionModal() {
 
         if (!request.detail.empty()) {
             verticalSpace(6.0f);
-            textMuted(request.kind == PermissionKind::Bash ? "context" : "new contents (preview)");
+            const char* detailLabel = "new contents (preview)";
+            if (request.kind == PermissionKind::Bash) detailLabel = "context";
+            else if (request.kind == PermissionKind::Web) detailLabel = "about this request";
+            textMuted(detailLabel);
             ImGui::PushStyleColor(ImGuiCol_ChildBg, kBackground);
             ImGui::BeginChild("##detail", ImVec2(0, 180),
                               ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_Borders,
@@ -814,9 +826,10 @@ void App::drawSettingsWindow() {
         ImGui::Checkbox("Auto-approve file reads", &settings_.autoApproveReads);
         ImGui::Checkbox("Auto-approve file writes", &settings_.autoApproveWrites);
         ImGui::Checkbox("Auto-approve shell commands", &settings_.autoApproveBash);
+        ImGui::Checkbox("Auto-approve web fetches", &settings_.autoApproveWeb);
         if (fonts_.caption) ImGui::PushFont(fonts_.caption);
         wrappedMuted("Secrets (.env, keys, ~/.ssh, credential stores) are refused whatever these say. "
-                     "Destructive shell commands are refused too.");
+                     "So are destructive shell commands and cloud metadata endpoints.");
         if (fonts_.caption) ImGui::PopFont();
 
         ImGui::SeparatorText("Context");

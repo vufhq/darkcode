@@ -34,6 +34,8 @@ add_executable(darkcode-desktop WIN32
   src/chat.cpp
   src/tools.cpp
   src/permissions.cpp
+  src/html.cpp
+  src/web.cpp
   ${IMGUI_DIR}/imgui.cpp
   ${IMGUI_DIR}/imgui_draw.cpp
   ${IMGUI_DIR}/imgui_tables.cpp
@@ -79,12 +81,16 @@ add_executable(darkcode-desktop-tests
   src/util.cpp
   src/chat.cpp
   src/permissions.cpp
+  src/html.cpp
+  src/web.cpp
+  src/http.cpp
 )
 target_include_directories(darkcode-desktop-tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
   "${CMAKE_CURRENT_SOURCE_DIR}/vendor"
 )
 target_compile_definitions(darkcode-desktop-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(darkcode-desktop-tests PRIVATE winhttp)
 if(MSVC)
   target_compile_options(darkcode-desktop-tests PRIVATE /utf-8 /W4 /permissive- /EHsc /MP)
   set_property(TARGET darkcode-desktop-tests PROPERTY MSVC_RUNTIME_LIBRARY

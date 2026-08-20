@@ -49,6 +49,8 @@ struct Settings {
     bool autoApproveReads = true;        // sensitive files are refused regardless
     bool autoApproveWrites = false;
     bool autoApproveBash = false;
+    /// Auto-approve web hosts. Cloud metadata endpoints stay refused regardless.
+    bool autoApproveWeb = false;
     bool sendProjectContext = true;
     float uiScale = 1.0f;
 

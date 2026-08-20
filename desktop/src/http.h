@@ -38,4 +38,29 @@ HttpResult httpStream(const std::string& method,
                       const std::string& body,
                       const StreamSink& sink);
 
+struct HttpFetchResult {
+    long status = 0;
+    std::string body;
+    std::string error;
+    /// True when `maxBytes` cut the read short.
+    bool truncated = false;
+    std::string contentType;
+    std::string location;
+};
+
+/// A single GET hop for `webFetch`.
+///
+/// Redirects are deliberately NOT followed: the caller walks them by hand so
+/// the permission policy is re-checked at every new host. WinHTTP's automatic
+/// handling would let an approved host bounce the request to a denied one with
+/// no second check.
+///
+/// The body is capped at `maxBytes` as it arrives, not by Content-Length —
+/// that header is a claim, not a guarantee, and a server can advertise 1KB then
+/// send gigabytes.
+HttpFetchResult httpFetchOnce(const std::string& url,
+                              const HttpHeaders& headers,
+                              int timeoutMs,
+                              size_t maxBytes);
+
 } // namespace dc

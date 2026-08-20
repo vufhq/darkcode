@@ -49,6 +49,37 @@ constexpr std::array<std::string_view, 22> kAllowBash{{
     "bun test", "bun test **",
 }};
 
+// Cloud instance-metadata endpoints. Link-local addresses that hand out
+// short-lived cloud credentials to anything on the box that asks, with no
+// authentication — the single most valuable target reachable from a machine
+// running an agent, and nothing a coding assistant legitimately needs.
+//
+// This list is why redirects are re-checked hop by hop: an allowed host that
+// 302s to 169.254.169.254 would otherwise walk straight past it.
+constexpr std::array<std::string_view, 6> kDenyWebHosts{{
+    "169.254.169.254",
+    "[fd00:ec2::254]",
+    "metadata.google.internal",
+    "metadata.goog",
+    "100.100.100.200",
+    "metadata.azure.com",
+}};
+
+/// Splits `host[:port]`, leaving bracketed IPv6 literals intact. A naive
+/// split on ':' would read `::1` as a port and silently match no rule — which
+/// in a security check means falling through to a decision nobody intended.
+std::pair<std::string, std::string> splitHostPort(const std::string& value) {
+    if (!value.empty() && value.front() == '[') {
+        const size_t close = value.find(']');
+        if (close == std::string::npos) return {value, ""};
+        const std::string rest = value.substr(close + 1);
+        return {value.substr(0, close + 1), startsWith(rest, ":") ? rest.substr(1) : ""};
+    }
+    const size_t colon = value.find_last_of(':');
+    if (colon == std::string::npos) return {value, ""};
+    return {value.substr(0, colon), value.substr(colon + 1)};
+}
+
 std::string normalizePath(std::string path) {
     std::replace(path.begin(), path.end(), '\\', '/');
     if (startsWith(path, "./")) path.erase(0, 2);
@@ -100,6 +131,34 @@ bool PermissionBroker::isWriteProtected(const std::string& projectRelativePath) 
     return matchesAny(normalizePath(projectRelativePath), kDenyWrite.data(), kDenyWrite.size());
 }
 
+bool PermissionBroker::matchesHostPattern(const std::string& host, const std::string& pattern) {
+    const std::string value = toLower(host);
+    const std::string rule = toLower(trim(pattern));
+    if (rule == "**" || rule == "*") return true;
+
+    const auto [valueHost, valuePort] = splitHostPort(value);
+    const auto [ruleHost, rulePort] = splitHostPort(rule);
+
+    if (!rulePort.empty() && rulePort != valuePort) return false;
+
+    if (startsWith(ruleHost, "*.")) {
+        // ".example.com" — any subdomain, but not the apex, matching how
+        // certificates and cookie domains are normally read.
+        const std::string suffix = ruleHost.substr(1);
+        return endsWith(valueHost, suffix) && valueHost.size() > suffix.size();
+    }
+    return ruleHost == valueHost;
+}
+
+const char* PermissionBroker::classifyWeb(const std::string& host) {
+    if (trim(host).empty()) return "deny";
+    for (const auto& pattern : kDenyWebHosts) {
+        if (matchesHostPattern(host, std::string(pattern))) return "deny";
+    }
+    // Nothing is pre-approved: the first fetch of any host prompts.
+    return "ask";
+}
+
 const char* PermissionBroker::classifyBash(const std::string& command) {
     const std::string normalized = trim(command);
     if (normalized.empty()) return "deny";
@@ -148,7 +207,8 @@ PermissionOutcome PermissionBroker::ask(const PermissionRequest& request) {
         switch (request.kind) {
             case PermissionKind::FsRead: allowAllReads_ = true; break;
             case PermissionKind::FsWrite: allowAllWrites_ = true; break;
-            case PermissionKind::Bash: allowedCommands_.insert(request.subject); break;
+            case PermissionKind::Bash: allowedCommands_.insert(request.grantKey); break;
+            case PermissionKind::Web: allowedHosts_.insert(request.grantKey); break;
         }
     }
     return {true, {}};
@@ -216,9 +276,38 @@ PermissionOutcome PermissionBroker::checkBash(const std::string& command, bool a
     request.title = "Run a shell command";
     request.subject = command;
     request.detail = "Runs through bash in the project directory.";
+    request.grantKey = command;
     request.sessionLabel = "Always allow \"" + firstWord(command) + " ...\" this session";
     // Note: the session grant is keyed on the exact command, not the program,
     // so approving `git push origin main` never blanket-approves `git push`.
+    return ask(request);
+}
+
+PermissionOutcome PermissionBroker::checkWeb(const std::string& url,
+                                             const std::string& host,
+                                             bool autoApprove) {
+    if (std::string(classifyWeb(host)) == "deny") {
+        return {false,
+                "Fetching " + host +
+                    " is blocked: it is a cloud instance-metadata endpoint, which hands out "
+                    "credentials to anything that asks."};
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (cancelled_) return {false, "Turn stopped"};
+        if (autoApprove) return {true, {}};
+        if (allowedHosts_.count(toLower(host)) > 0) return {true, {}};
+    }
+
+    PermissionRequest request;
+    request.kind = PermissionKind::Web;
+    request.title = "Fetch a URL";
+    request.subject = url;
+    request.detail =
+        "Fetched from this machine, so it can reach your local network and dev servers. "
+        "The response is treated as untrusted data, never as instructions.";
+    request.grantKey = toLower(host);
+    request.sessionLabel = "Always allow " + host + " this session";
     return ask(request);
 }
 
@@ -259,6 +348,7 @@ void PermissionBroker::resetSessionGrants() {
     allowAllReads_ = false;
     allowAllWrites_ = false;
     allowedCommands_.clear();
+    allowedHosts_.clear();
 }
 
 } // namespace dc

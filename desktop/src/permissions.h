@@ -14,7 +14,7 @@
 
 namespace dc {
 
-enum class PermissionKind { FsRead, FsWrite, Bash };
+enum class PermissionKind { FsRead, FsWrite, Bash, Web };
 
 enum class PermissionDecision { Pending, AllowOnce, AllowSession, Deny };
 
@@ -25,6 +25,10 @@ struct PermissionRequest {
     std::string subject; // the path or command itself
     std::string detail;  // preview: file contents, replacement text, ...
     std::string sessionLabel; // text for the "always allow" button
+    /// What an "always allow" grant is keyed on — the exact command, or the
+    /// host. Kept separate from `subject` so the grant can be narrower than
+    /// what is displayed (a URL is shown, only its host is granted).
+    std::string grantKey;
 };
 
 struct PermissionOutcome {
@@ -41,6 +45,9 @@ public:
                                  const std::string& preview,
                                  bool autoApprove);
     PermissionOutcome checkBash(const std::string& command, bool autoApprove);
+    /// Called once per redirect hop, never hoisted: the hosts after the first
+    /// are chosen by the remote server, not by the model.
+    PermissionOutcome checkWeb(const std::string& url, const std::string& host, bool autoApprove);
 
     /// UI side.
     bool hasPending();
@@ -59,6 +66,14 @@ public:
     /// "allow" / "deny" / "ask" against the default bash policy.
     static const char* classifyBash(const std::string& command);
 
+    /// Host-pattern matcher. `**` any host, `example.com` exact,
+    /// `*.example.com` any subdomain but not the apex, `localhost:3000` a
+    /// specific port. A pattern without a port matches any port; a pattern with
+    /// one matches only that port — naming a port is how you exclude the others.
+    static bool matchesHostPattern(const std::string& host, const std::string& pattern);
+    /// "deny" / "ask" against the default web policy. Nothing is pre-approved.
+    static const char* classifyWeb(const std::string& host);
+
 private:
     PermissionOutcome ask(const PermissionRequest& request);
 
@@ -72,6 +87,7 @@ private:
     bool allowAllWrites_ = false;
     bool allowAllReads_ = false;
     std::set<std::string> allowedCommands_; // exact commands approved this session
+    std::set<std::string> allowedHosts_;    // hosts approved this session
 };
 
 } // namespace dc

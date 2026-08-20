@@ -12,6 +12,7 @@
 
 #include "config.h"
 #include "util.h"
+#include "web.h"
 
 namespace fs = std::filesystem;
 
@@ -1002,14 +1003,32 @@ ToolResult executeLocalTool(const std::string& toolName, const json& input, Tool
     }
 
     // ---- web -------------------------------------------------------------
+    // `webSearch` runs on the server, so it never reaches this dispatcher.
     if (toolName == "webFetch") {
-        // `webSearch` runs on the server, so it never reaches this dispatcher.
-        // `webFetch` does: it is meant to run on the user's machine so it can
-        // reach local dev servers. Not built here yet — say so plainly rather
-        // than returning "unknown tool", which reads to the model like a bug it
-        // should retry around.
-        return fail("webFetch is not available in the DarkCode desktop app yet. "
-                    "Ask the user to paste the content, or use the terminal CLI for this.");
+        bool ok = true;
+        const std::string url = requiredString(input, "url", ok);
+        if (!ok) return fail("webFetch requires a `url`");
+
+        WebFetchOptions options;
+        options.format = optionalString(input, "format", "");
+        if (input.contains("maxChars") && input["maxChars"].is_number()) {
+            options.maxChars = static_cast<size_t>(
+                std::clamp(input["maxChars"].get<long long>(), 1000LL,
+                           static_cast<long long>(kMaxCharsLimit)));
+        }
+        if (input.contains("timeout") && input["timeout"].is_number()) {
+            options.timeoutMs = std::clamp(static_cast<int>(input["timeout"].get<long long>()), 1000,
+                                           kMaxFetchTimeoutMs);
+        }
+
+        // Host approval happens inside webFetch, per redirect hop — it cannot be
+        // hoisted here, because the hosts after the first are chosen by the
+        // remote server rather than by the model.
+        const bool autoWeb = context.settings ? context.settings->autoApproveWeb : false;
+        const WebFetchOutcome outcome =
+            webFetch(url, options, *context.permissions, autoWeb, context.cancelled);
+        if (!outcome.ok) return fail(outcome.error);
+        return succeed(outcome.result);
     }
 
     // ---- LSP -------------------------------------------------------------
