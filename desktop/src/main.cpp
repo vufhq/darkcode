@@ -203,7 +203,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             app.render();
 
             ImGui::Render();
-            const ImVec4& background = dc::theme::kBackground;
+            const ImVec4& background = dc::theme::kCanvas;
             const float clearColor[4] = {background.x, background.y, background.z, 1.0f};
             g_context->OMSetRenderTargets(1, &g_renderTarget, nullptr);
             g_context->ClearRenderTargetView(g_renderTarget, clearColor);

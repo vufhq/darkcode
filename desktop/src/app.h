@@ -64,12 +64,13 @@ private:
     // ---- drawing ---------------------------------------------------------
     void drawSidebar(float width);
     void drawMainColumn();
+    void drawTopBar();
     void drawTranscript();
     void drawComposer();
     void drawStatusBar();
-    void drawMessage(const Message& message);
-    void drawToolCall(const ToolCall& tool);
-    void drawMarkdown(const std::string& text);
+    void drawMessage(const Message& message, float column);
+    void drawToolCall(const ToolCall& tool, float column);
+    void drawMarkdown(const std::string& value, float column);
     void drawEmptyState();
     void drawSignedOutState();
     void drawPermissionModal();

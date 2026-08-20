@@ -1,10 +1,17 @@
-// All rendering. Layout is hand-laid rather than docked: a fixed sidebar, a
-// transcript that takes the remaining height, then the composer and a status
-// line. Predictable, and it keeps the window free of chrome the user has to
-// arrange before the app is usable.
+// All rendering.
+//
+// The layout is hand-laid rather than docked: a fixed sidebar, a top bar
+// carrying the session's controls, a transcript that takes the remaining
+// height, then the composer and a status line. Predictable, and it keeps the
+// window free of chrome the user has to arrange before the app is usable.
+//
+// Two conventions run through this file. Panels are separated by value and a
+// hairline rather than by borders on everything, and the transcript is capped
+// at a readable measure and centred instead of stretching to the window width.
 #include "app.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #include "imgui.h"
@@ -16,50 +23,148 @@ namespace {
 
 using namespace theme;
 
-constexpr float kSidebarWidth = 264.0f;
+// ---------------------------------------------------------------------------
+// Small RAII wrappers. ImGui's push/pop pairs are easy to leak past an early
+// return; scoping them makes that impossible.
+// ---------------------------------------------------------------------------
 
-void textMuted(const std::string& text) {
-    ImGui::PushStyleColor(ImGuiCol_Text, kTextMuted);
-    ImGui::TextUnformatted(text.c_str());
-    ImGui::PopStyleColor();
+class FontScope {
+public:
+    explicit FontScope(ImFont* font) : pushed_(font != nullptr) {
+        if (pushed_) ImGui::PushFont(font);
+    }
+    ~FontScope() {
+        if (pushed_) ImGui::PopFont();
+    }
+    FontScope(const FontScope&) = delete;
+    FontScope& operator=(const FontScope&) = delete;
+
+private:
+    bool pushed_;
+};
+
+class ColorScope {
+public:
+    ColorScope(ImGuiCol index, const ImVec4& color) : count_(1) { ImGui::PushStyleColor(index, color); }
+    ColorScope(ImGuiCol a, const ImVec4& ca, ImGuiCol b, const ImVec4& cb) : count_(2) {
+        ImGui::PushStyleColor(a, ca);
+        ImGui::PushStyleColor(b, cb);
+    }
+    ColorScope(ImGuiCol a, const ImVec4& ca, ImGuiCol b, const ImVec4& cb, ImGuiCol c, const ImVec4& cc)
+        : count_(3) {
+        ImGui::PushStyleColor(a, ca);
+        ImGui::PushStyleColor(b, cb);
+        ImGui::PushStyleColor(c, cc);
+    }
+    ~ColorScope() { ImGui::PopStyleColor(count_); }
+    ColorScope(const ColorScope&) = delete;
+    ColorScope& operator=(const ColorScope&) = delete;
+
+private:
+    int count_;
+};
+
+// ---------------------------------------------------------------------------
+// Text primitives
+// ---------------------------------------------------------------------------
+
+void text(const std::string& value, const ImVec4& color) {
+    const ColorScope scope(ImGuiCol_Text, color);
+    ImGui::TextUnformatted(value.c_str());
 }
 
-void wrappedMuted(const std::string& text) {
-    ImGui::PushStyleColor(ImGuiCol_Text, kTextMuted);
-    ImGui::TextWrapped("%s", text.c_str());
-    ImGui::PopStyleColor();
+void wrapped(const std::string& value, const ImVec4& color) {
+    const ColorScope scope(ImGuiCol_Text, color);
+    ImGui::TextWrapped("%s", value.c_str());
 }
 
-void verticalSpace(float pixels) { ImGui::Dummy(ImVec2(0.0f, pixels)); }
+void space(float pixels) { ImGui::Dummy(ImVec2(0.0f, pixels)); }
 
-/// A filled dot, used for tool status.
-void statusDot(const ImVec4& color) {
-    const float radius = ImGui::GetFontSize() * 0.22f;
-    const ImVec2 cursor = ImGui::GetCursorScreenPos();
-    const ImVec2 center(cursor.x + radius + 2.0f, cursor.y + ImGui::GetTextLineHeight() * 0.5f);
-    ImGui::GetWindowDrawList()->AddCircleFilled(center, radius, ImGui::GetColorU32(color));
-    ImGui::Dummy(ImVec2(radius * 2.0f + 6.0f, ImGui::GetTextLineHeight()));
-    ImGui::SameLine(0.0f, 6.0f);
+/// Trims to fit, appending an ellipsis. Abrupt clipping mid-glyph is one of
+/// those details that reads as unfinished even when nobody can say why.
+std::string elide(const std::string& value, float maxWidth) {
+    if (maxWidth <= 0.0f) return {};
+    if (ImGui::CalcTextSize(value.c_str()).x <= maxWidth) return value;
+
+    std::string out = value;
+    while (!out.empty()) {
+        // Never split a UTF-8 sequence: drop continuation bytes with the lead.
+        out.pop_back();
+        while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xC0) == 0x80) out.pop_back();
+        if (ImGui::CalcTextSize((out + "\xE2\x80\xA6").c_str()).x <= maxWidth) break;
+    }
+    return out + "\xE2\x80\xA6"; // U+2026
 }
 
-bool accentButton(const char* label, const ImVec2& size = ImVec2(0, 0)) {
-    ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, withAlpha(kAccent, 0.85f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, withAlpha(kAccent, 0.70f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+/// A one-pixel rule at the current cursor, spanning the available width.
+void hairline(float inset = 0.0f) {
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x;
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(origin.x + inset, origin.y),
+                                        ImVec2(origin.x + width - inset, origin.y),
+                                        ImGui::GetColorU32(kBorder));
+    ImGui::Dummy(ImVec2(0.0f, 1.0f));
+}
+
+// ---------------------------------------------------------------------------
+// Controls
+// ---------------------------------------------------------------------------
+
+bool primaryButton(const char* label, const ImVec2& size = ImVec2(0, 0)) {
+    const ColorScope colors(ImGuiCol_Button, kAccent, ImGuiCol_ButtonHovered, kAccentHover,
+                            ImGuiCol_ButtonActive, mix(kAccent, kCanvas, 0.15f));
+    const ColorScope textColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+    ImGui::PushStyleColor(ImGuiCol_Border, withAlpha(kAccentHover, 0.6f));
     const bool pressed = ImGui::Button(label, size);
-    ImGui::PopStyleColor(4);
+    ImGui::PopStyleColor();
     return pressed;
 }
 
+bool secondaryButton(const char* label, const ImVec2& size = ImVec2(0, 0)) {
+    return ImGui::Button(label, size);
+}
+
+/// No fill until hovered. For tertiary actions that should not compete.
 bool ghostButton(const char* label, const ImVec2& size = ImVec2(0, 0)) {
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kPanelRaised);
-    ImGui::PushStyleColor(ImGuiCol_Text, kTextMuted);
+    const ColorScope colors(ImGuiCol_Button, ImVec4(0, 0, 0, 0), ImGuiCol_ButtonHovered, kSurfaceHover,
+                            ImGuiCol_Text, kTextMuted);
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
     const bool pressed = ImGui::Button(label, size);
-    ImGui::PopStyleColor(3);
+    ImGui::PopStyleColor();
     return pressed;
 }
+
+bool dangerButton(const char* label, const ImVec2& size = ImVec2(0, 0)) {
+    const ColorScope colors(ImGuiCol_Button, withAlpha(kDanger, 0.16f), ImGuiCol_ButtonHovered,
+                            withAlpha(kDanger, 0.26f), ImGuiCol_Text, kDanger);
+    ImGui::PushStyleColor(ImGuiCol_Border, withAlpha(kDanger, 0.45f));
+    const bool pressed = ImGui::Button(label, size);
+    ImGui::PopStyleColor();
+    return pressed;
+}
+
+/// ImGui derives the checkbox square from FramePadding, which is tuned for
+/// text inputs and leaves the box towering over its own label. Compact it.
+bool compactCheckbox(const char* label, bool* value) {
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(kSpace1, 3.0f));
+    const bool changed = ImGui::Checkbox(label, value);
+    ImGui::PopStyleVar();
+    return changed;
+}
+
+/// A small filled dot. Tool status, connection state.
+void statusDot(const ImVec4& color, float sizeScale = 0.22f) {
+    const float radius = ImGui::GetFontSize() * sizeScale;
+    const ImVec2 cursor = ImGui::GetCursorScreenPos();
+    const ImVec2 center(cursor.x + radius, cursor.y + ImGui::GetTextLineHeight() * 0.5f);
+    ImGui::GetWindowDrawList()->AddCircleFilled(center, radius, ImGui::GetColorU32(color));
+    ImGui::Dummy(ImVec2(radius * 2.0f, ImGui::GetTextLineHeight()));
+    ImGui::SameLine(0.0f, kSpace2);
+}
+
+// ---------------------------------------------------------------------------
+// Tool summaries
+// ---------------------------------------------------------------------------
 
 /// One-line description of what a tool call is doing, from its input.
 std::string toolSummary(const ToolCall& tool) {
@@ -71,12 +176,12 @@ std::string toolSummary(const ToolCall& tool) {
     };
 
     if (tool.toolName == "bash") return str("command");
+    if (tool.toolName == "webFetch") return str("url");
     if (tool.toolName == "grep") {
         const std::string where = str("path");
         return str("pattern") + (where.empty() || where == "." ? "" : "  in " + where);
     }
     if (tool.toolName == "glob") return str("pattern");
-    if (tool.toolName == "webFetch") return str("url");
     if (tool.toolName == "todoWrite") {
         if (input.is_object() && input.contains("todos") && input["todos"].is_array()) {
             return std::to_string(input["todos"].size()) + " tasks";
@@ -95,8 +200,8 @@ std::string formatDuration(long long ms) {
     return buffer;
 }
 
-/// Compact, readable rendering of a tool result. The raw JSON is available on
-/// expand; this is the line the user actually reads.
+/// Compact rendering of a tool result. The raw JSON is available on expand;
+/// this is the line the user actually reads.
 std::string toolResultPreview(const ToolCall& tool) {
     if (tool.state == ToolState::OutputError) return tool.errorText;
     if (!tool.output.is_object()) return tool.output.is_null() ? "" : tool.output.dump();
@@ -121,15 +226,15 @@ std::string toolResultPreview(const ToolCall& tool) {
         const std::string err = trim(output.value("stderr", std::string()));
         std::string summary = "exit " + std::to_string(exitCode);
         const std::string body = !out.empty() ? out : err;
-        if (!body.empty()) summary += "  " + splitLines(body).front();
+        if (!body.empty()) summary += "   " + splitLines(body).front();
         return summary;
     }
     if (tool.toolName == "webFetch") {
-        const std::string format = output.value("format", std::string());
         const std::string title = output.value("title", std::string());
-        std::string summary = std::to_string(output.value("status", 0)) + " " + format + ", " +
+        std::string summary = std::to_string(output.value("status", 0)) + " " +
+                              output.value("format", std::string()) + ", " +
                               humanBytes(static_cast<long long>(output.value("content", std::string()).size()));
-        if (!title.empty()) summary += "  " + title;
+        if (!title.empty()) summary += "   " + title;
         return summary;
     }
     if (output.contains("bytesWritten")) {
@@ -139,7 +244,45 @@ std::string toolResultPreview(const ToolCall& tool) {
     return output.dump();
 }
 
+ImVec4 toolStateColor(ToolState state) {
+    switch (state) {
+        case ToolState::OutputAvailable: return kSuccess;
+        case ToolState::OutputError: return kDanger;
+        case ToolState::InputAvailable: return kWarning;
+        case ToolState::InputStreaming: return kTextFaint;
+    }
+    return kTextFaint;
+}
+
+/// Three dots that fade in sequence. Cheap, and it makes a long pause read as
+/// "working" rather than "hung".
+void workingIndicator() {
+    const double now = ImGui::GetTime();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float radius = ImGui::GetFontSize() * 0.16f;
+    const float step = radius * 3.2f;
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    for (int i = 0; i < 3; ++i) {
+        const float phase = static_cast<float>(now * 3.0 - i * 0.5);
+        const float alpha = 0.35f + 0.45f * (0.5f + 0.5f * std::sin(phase));
+        draw->AddCircleFilled(ImVec2(origin.x + radius + step * i, origin.y + ImGui::GetTextLineHeight() * 0.5f),
+                              radius, ImGui::GetColorU32(withAlpha(kAccent, alpha)));
+    }
+    ImGui::Dummy(ImVec2(step * 3.0f, ImGui::GetTextLineHeight()));
+    ImGui::SameLine(0.0f, kSpace2);
+}
+
+const char* const kSuggestions[] = {
+    "Explain the architecture of this project",
+    "Find every TODO and summarise what is left",
+    "Add a test for the trickiest function here",
+};
+
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Frame
+// ---------------------------------------------------------------------------
 
 void App::render() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -147,19 +290,23 @@ void App::render() {
     ImGui::SetNextWindowSize(viewport->WorkSize);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, kBackground);
+    const ColorScope background(ImGuiCol_WindowBg, kCanvas);
     ImGui::Begin("##root", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
                      ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBringToFrontOnFocus |
                      ImGuiWindowFlags_NoNavFocus);
-    ImGui::PopStyleColor();
     ImGui::PopStyleVar();
 
     drawSidebar(kSidebarWidth);
     ImGui::SameLine(0.0f, 0.0f);
-    drawMainColumn();
 
+    // The seam between sidebar and content: one hairline, full height.
+    const ImVec2 seam = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddLine(seam, ImVec2(seam.x, seam.y + viewport->WorkSize.y),
+                                        ImGui::GetColorU32(kBorder));
+
+    drawMainColumn();
     ImGui::End();
 
     drawPermissionModal();
@@ -167,17 +314,14 @@ void App::render() {
     drawToast();
 }
 
+// ---------------------------------------------------------------------------
+// Sidebar
+// ---------------------------------------------------------------------------
+
 void App::drawSidebar(float width) {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanel);
-    ImGui::BeginChild("##sidebar", ImVec2(width, 0), ImGuiChildFlags_AlwaysUseWindowPadding,
+    const ColorScope background(ImGuiCol_ChildBg, kSidebar);
+    ImGui::BeginChild("##sidebar", ImVec2(width, 0), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoScrollbar);
-
-    if (fonts_.heading) ImGui::PushFont(fonts_.heading);
-    ImGui::TextUnformatted("DarkCode");
-    if (fonts_.heading) ImGui::PopFont();
-    textMuted("desktop");
-
-    verticalSpace(12.0f);
 
     bool streaming = false;
     {
@@ -185,15 +329,50 @@ void App::drawSidebar(float width) {
         streaming = streaming_;
     }
 
+    // ---- wordmark --------------------------------------------------------
+    ImGui::SetCursorPos(ImVec2(kSpace4, kSpace4));
+    {
+        // A small accent tile in place of a logo: enough of a mark to anchor
+        // the corner without pretending to be artwork.
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const float side = ImGui::GetFontSize() * 1.15f;
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddRectFilled(origin, ImVec2(origin.x + side, origin.y + side),
+                            ImGui::GetColorU32(kAccent), kRadiusSm);
+        draw->AddRectFilled(ImVec2(origin.x + side * 0.30f, origin.y + side * 0.42f),
+                            ImVec2(origin.x + side * 0.70f, origin.y + side * 0.58f),
+                            ImGui::GetColorU32(ImVec4(1, 1, 1, 0.95f)), 1.0f);
+        ImGui::Dummy(ImVec2(side, side));
+        ImGui::SameLine(0.0f, kSpace2 + 2.0f);
+
+        const FontScope font(fonts_.display);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 1.0f);
+        text("DarkCode", kText);
+    }
+
+    ImGui::SetCursorPosX(kSpace4);
+    space(kSpace3);
+
+    // ---- new session -----------------------------------------------------
+    ImGui::SetCursorPosX(kSpace4);
     ImGui::BeginDisabled(streaming);
-    if (accentButton("New session", ImVec2(-FLT_MIN, 0))) startNewSession();
+    if (primaryButton("New session", ImVec2(width - kSpace4 * 2.0f, 34.0f))) startNewSession();
     ImGui::EndDisabled();
 
-    verticalSpace(10.0f);
+    space(kSpace4);
+    ImGui::SetCursorPosX(kSpace4);
+    {
+        const FontScope font(fonts_.caption);
+        text("SESSIONS", kTextFaint);
+    }
+    space(kSpace1);
 
-    const float footerHeight = ImGui::GetFrameHeightWithSpacing() * 2.0f + 28.0f;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
-    ImGui::BeginChild("##sessionList", ImVec2(0, -footerHeight));
+    // ---- session list ----------------------------------------------------
+    // Anchored to the bottom rather than stacked, so ItemSpacing drift cannot
+    // push the last control past the window edge.
+    const float footerHeight = 30.0f + ImGui::GetTextLineHeight() + kSpace5 + kSpace4;
+    ImGui::SetCursorPosX(kSpace2);
+    ImGui::BeginChild("##sessionList", ImVec2(width - kSpace2 * 2.0f, -footerHeight));
 
     std::vector<SessionSummary> sessions;
     bool loading = false;
@@ -204,17 +383,19 @@ void App::drawSidebar(float width) {
     }
 
     if (sessions.empty()) {
-        wrappedMuted(loading ? "Loading sessions..."
-                             : (signedIn_ ? "No sessions yet. Send a message to start one."
-                                          : "Sign in to see your sessions."));
+        ImGui::SetCursorPosX(kSpace2);
+        const FontScope font(fonts_.caption);
+        wrapped(loading ? "Loading\xE2\x80\xA6"
+                        : (signedIn_ ? "No sessions yet." : "Sign in to see your sessions."),
+                kTextFaint);
     }
 
     // Rows are drawn by hand rather than with Selectable: two lines of text at
     // different sizes need one shared hit box, and moving the layout cursor
     // around a Selectable fights the child window's scrolling.
-    const float rowPaddingX = 10.0f;
-    const float rowHeight = ImGui::GetTextLineHeight() * 2.0f + 14.0f;
     const float rowWidth = ImGui::GetContentRegionAvail().x;
+    const float rowHeight = ImGui::GetTextLineHeight() + (fonts_.caption ? fonts_.caption->FontSize : 11.0f) +
+                            kSpace3 + 2.0f;
 
     for (const SessionSummary& session : sessions) {
         ImGui::PushID(session.id.c_str());
@@ -229,101 +410,172 @@ void App::drawSidebar(float width) {
 
         ImDrawList* draw = ImGui::GetWindowDrawList();
         const ImVec2 corner(origin.x + rowWidth, origin.y + rowHeight);
-        if (selected || hovered) {
-            draw->AddRectFilled(origin, corner,
-                                ImGui::GetColorU32(selected ? withAlpha(kAccent, 0.18f) : kPanelRaised),
-                                8.0f);
-        }
         if (selected) {
-            draw->AddRectFilled(origin, ImVec2(origin.x + 3.0f, corner.y), ImGui::GetColorU32(kAccent),
-                                2.0f);
+            draw->AddRectFilled(origin, corner, ImGui::GetColorU32(kSurfaceHover), kRadiusMd);
+            draw->AddRectFilled(ImVec2(origin.x, origin.y + kSpace1),
+                                ImVec2(origin.x + 2.0f, corner.y - kSpace1),
+                                ImGui::GetColorU32(kAccent), 1.0f);
+        } else if (hovered) {
+            draw->AddRectFilled(origin, corner, ImGui::GetColorU32(withAlpha(kSurface, 0.75f)), kRadiusMd);
         }
 
-        draw->PushClipRect(ImVec2(origin.x + rowPaddingX, origin.y),
-                           ImVec2(corner.x - rowPaddingX, corner.y), true);
-        draw->AddText(ImVec2(origin.x + rowPaddingX + 4.0f, origin.y + 5.0f),
-                      ImGui::GetColorU32(selected ? kText : kTextMuted), session.title.c_str());
+        const float textX = origin.x + kSpace3;
+        const float textWidth = rowWidth - kSpace3 * 2.0f;
+        {
+            const FontScope font(fonts_.medium);
+            draw->AddText(fonts_.medium ? fonts_.medium : nullptr,
+                          fonts_.medium ? fonts_.medium->FontSize : 0.0f,
+                          ImVec2(textX, origin.y + kSpace2 - 2.0f),
+                          ImGui::GetColorU32(selected ? kText : kTextMuted),
+                          elide(session.title, textWidth).c_str());
+        }
         if (fonts_.caption) {
             draw->AddText(fonts_.caption, fonts_.caption->FontSize,
-                          ImVec2(origin.x + rowPaddingX + 4.0f,
-                                 origin.y + 5.0f + ImGui::GetTextLineHeight()),
+                          ImVec2(textX, origin.y + kSpace2 + ImGui::GetTextLineHeight() - 3.0f),
                           ImGui::GetColorU32(kTextFaint), session.lastActivityAt.substr(0, 10).c_str());
         }
-        draw->PopClipRect();
 
         ImGui::PopID();
     }
 
     ImGui::EndChild();
-    ImGui::PopStyleColor();
 
-    ImGui::Separator();
-    verticalSpace(4.0f);
+    // ---- footer ----------------------------------------------------------
+    ImGui::SetCursorPos(ImVec2(kSpace4, ImGui::GetWindowHeight() - footerHeight));
+    hairline();
 
-    const double credits = credits_.load();
-    if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-    if (credits >= 0) {
-        char buffer[64];
-        std::snprintf(buffer, sizeof(buffer), "%.2f credits", credits);
-        textMuted(buffer);
-    } else {
-        textMuted(signedIn_ ? "credits unavailable" : "signed out");
+    ImGui::SetCursorPos(ImVec2(kSpace4, ImGui::GetWindowHeight() - footerHeight + kSpace3));
+    {
+        const FontScope font(fonts_.caption);
+        const double credits = credits_.load();
+        if (credits >= 0) {
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer), "%.2f credits", credits);
+            statusDot(credits > 1.0 ? kSuccess : kWarning, 0.18f);
+            text(buffer, kTextMuted);
+        } else {
+            statusDot(signedIn_ ? kTextFaint : kDanger, 0.18f);
+            text(signedIn_ ? "credits unavailable" : "signed out", kTextFaint);
+        }
     }
-    if (fonts_.caption) ImGui::PopFont();
 
-    if (ghostButton("Settings", ImVec2(-FLT_MIN, 0))) showSettings_ = true;
+    ImGui::SetCursorPos(ImVec2(kSpace4, ImGui::GetWindowHeight() - 30.0f - kSpace3));
+    if (ghostButton("Settings", ImVec2(width - kSpace4 * 2.0f, 30.0f))) showSettings_ = true;
 
     ImGui::EndChild();
-    ImGui::PopStyleColor();
 }
 
+// ---------------------------------------------------------------------------
+// Main column
+// ---------------------------------------------------------------------------
+
 void App::drawMainColumn() {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, kBackground);
-    ImGui::BeginChild("##main", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding,
+    ImGui::BeginChild("##main", ImVec2(0, 0), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     if (!signedIn_) {
         drawSignedOutState();
         ImGui::EndChild();
-        ImGui::PopStyleColor();
         return;
     }
 
-    // ---- header ----------------------------------------------------------
-    if (fonts_.heading) ImGui::PushFont(fonts_.heading);
-    ImGui::TextUnformatted(activeSessionId_.empty() ? "New session" : activeSessionTitle_.c_str());
-    if (fonts_.heading) ImGui::PopFont();
+    drawTopBar();
 
-    ImGui::SameLine();
-    {
-        const std::string modelLabel(modelDisplayName(settings_.model));
-        const std::string right = modelLabel + "   " + settings_.mode;
-        const float rightWidth = ImGui::CalcTextSize(right.c_str()).x;
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - rightWidth);
-        if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-        textMuted(right);
-        if (fonts_.caption) ImGui::PopFont();
-    }
+    const float composerHeight = ImGui::GetTextLineHeight() * 3.0f + 34.0f + kSpace4 * 2.0f + kSpace2;
+    const float statusHeight = ImGui::GetTextLineHeight() + kSpace3;
 
-    verticalSpace(6.0f);
-
-    // ---- transcript ------------------------------------------------------
-    const float composerHeight = ImGui::GetTextLineHeight() * 4.2f + ImGui::GetFrameHeightWithSpacing() +
-                                 ImGui::GetStyle().ItemSpacing.y * 3.0f;
-    const float statusHeight = ImGui::GetTextLineHeight() + ImGui::GetStyle().ItemSpacing.y * 2.0f;
-
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
-    ImGui::BeginChild("##transcript", ImVec2(0, -(composerHeight + statusHeight)), ImGuiChildFlags_None);
+    ImGui::BeginChild("##transcript", ImVec2(0, -(composerHeight + statusHeight)),
+                      ImGuiChildFlags_None);
     drawTranscript();
     ImGui::EndChild();
-    ImGui::PopStyleColor();
 
     drawComposer();
     drawStatusBar();
 
     ImGui::EndChild();
-    ImGui::PopStyleColor();
 }
+
+void App::drawTopBar() {
+    const float height = kTopBarHeight;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x;
+
+    bool streaming = false;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        streaming = streaming_;
+    }
+
+    // Title and controls are positioned absolutely against the bar's centre
+    // line. Laying them out with SameLine couples their baselines, which is
+    // what left the combo sitting a few pixels below the button.
+    const float frameHeight = ImGui::GetFrameHeight();
+    const float controlsY = (height - frameHeight) * 0.5f;
+
+    ImGui::SetCursorPos(ImVec2(kSpace5, (height - ImGui::GetTextLineHeight()) * 0.5f));
+    {
+        const FontScope font(fonts_.heading);
+        const std::string title = activeSessionId_.empty() ? "New session" : activeSessionTitle_;
+        text(elide(title, width * 0.45f), kText);
+    }
+
+    // Mode and model belong to the session, so they live in the session's bar
+    // rather than beside the composer, where they read as message options.
+    const float modelWidth = 168.0f;
+    const float modeWidth = 78.0f;
+    const float controlsWidth = modelWidth + modeWidth + kSpace2;
+
+    ImGui::SetCursorPos(ImVec2(width - controlsWidth - kSpace5, controlsY));
+
+    const bool planMode = settings_.mode == "PLAN";
+    ImGui::BeginDisabled(streaming);
+    {
+        // Stable widget id: without the "##mode" suffix the label *is* the id,
+        // so toggling would change the id and shuffle keyboard focus.
+        const ImVec4 tint = planMode ? kWarning : kSuccess;
+        const ColorScope colors(ImGuiCol_Button, withAlpha(tint, 0.12f), ImGuiCol_ButtonHovered,
+                                withAlpha(tint, 0.22f), ImGuiCol_Text, tint);
+        ImGui::PushStyleColor(ImGuiCol_Border, withAlpha(tint, 0.35f));
+        const FontScope font(fonts_.medium);
+        if (ImGui::Button(planMode ? "PLAN##mode" : "BUILD##mode", ImVec2(modeWidth, frameHeight))) {
+            settings_.mode = planMode ? "BUILD" : "PLAN";
+            settings_.save();
+        }
+        ImGui::PopStyleColor();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(planMode ? "PLAN â read-only tools. Click for BUILD."
+                                   : "BUILD â writes and shell enabled. Click for PLAN.");
+    }
+
+    ImGui::SameLine(0.0f, kSpace2);
+    ImGui::SetNextItemWidth(modelWidth);
+    if (ImGui::BeginCombo("##model", std::string(modelDisplayName(settings_.model)).c_str())) {
+        for (const ModelInfo& model : kModels) {
+            if (model.id.empty()) continue;
+            const std::string id(model.id);
+            const bool selected = id == settings_.model;
+            if (ImGui::Selectable(std::string(model.displayName).c_str(), selected)) {
+                settings_.model = id;
+                settings_.save();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", std::string(model.note).c_str());
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+
+    // ---- bottom hairline -------------------------------------------------
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(origin.x, origin.y + height),
+                                        ImVec2(origin.x + width, origin.y + height),
+                                        ImGui::GetColorU32(kBorder));
+    ImGui::SetCursorPos(ImVec2(0.0f, height + 1.0f));
+}
+
+// ---------------------------------------------------------------------------
+// Transcript
+// ---------------------------------------------------------------------------
 
 void App::drawTranscript() {
     std::vector<Message> snapshot;
@@ -341,224 +593,317 @@ void App::drawTranscript() {
         return;
     }
 
+    const float available = ImGui::GetContentRegionAvail().x;
+    const float column = std::min(available - kSpace5 * 2.0f, kContentMaxWidth);
+    const float inset = std::max(kSpace5, (available - column) * 0.5f);
+
+    space(kSpace5);
     for (size_t i = 0; i < snapshot.size(); ++i) {
         ImGui::PushID(static_cast<int>(i));
-        drawMessage(snapshot[i]);
+        ImGui::SetCursorPosX(inset);
+        drawMessage(snapshot[i], column);
         ImGui::PopID();
-        verticalSpace(10.0f);
+        space(kSpace5);
     }
 
     if (streaming && !status.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-        ImGui::TextUnformatted(status.c_str());
-        ImGui::PopStyleColor();
+        ImGui::SetCursorPosX(inset);
+        workingIndicator();
+        const FontScope font(fonts_.caption);
+        text(status, kTextMuted);
+        space(kSpace4);
     }
 
     if (scrollToBottom_.exchange(false)) ImGui::SetScrollHereY(1.0f);
 }
 
-void App::drawMessage(const Message& message) {
+void App::drawMessage(const Message& message, float column) {
     const bool isUser = message.role == "user";
 
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, isUser ? kPanelRaised : ImVec4(0, 0, 0, 0));
-    ImGui::BeginChild("##message", ImVec2(0, 0),
-                      ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
+    if (isUser) {
+        // A right-aligned bubble, sized to its content up to a limit. The
+        // asymmetry alone tells you who is speaking, so no label is needed.
+        const std::string body = message.plainText();
+        const float maxBubble = column * 0.78f;
+        const float padding = kSpace3;
+        ImGui::PushTextWrapPos(0.0f);
+        // Slack matters: sized to exactly the measured width, the last word
+        // wraps to a second line on a rounding difference.
+        const float natural = ImGui::CalcTextSize(body.c_str()).x + padding * 2.0f + 6.0f;
+        ImGui::PopTextWrapPos();
+        const float bubble = std::min(std::max(natural, 120.0f), maxBubble);
 
-    if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-    ImGui::PushStyleColor(ImGuiCol_Text, isUser ? kTextMuted : kAccent);
-    ImGui::TextUnformatted(isUser ? "You" : "DarkCode");
-    ImGui::PopStyleColor();
-    if (fonts_.caption) ImGui::PopFont();
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (column - bubble));
 
-    verticalSpace(2.0f);
+        const ColorScope background(ImGuiCol_ChildBg, kSurface);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(padding, kSpace2 + 2.0f));
+        ImGui::BeginChild("##user", ImVec2(bubble, 0),
+                          ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding |
+                              ImGuiChildFlags_Borders);
+        // 0.0f means "the content region's right edge". Passing a width here
+        // instead would be measured from the window origin, so the padding
+        // would be subtracted twice and the text would wrap early.
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(body.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        return;
+    }
 
-    if (message.metadata.compactionDropped > 0 && !isUser) {
-        if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-        ImGui::PushStyleColor(ImGuiCol_Text, kWarning);
-        ImGui::Text("Context compacted - %d earlier messages summarised",
+    // ---- assistant -------------------------------------------------------
+    ImGui::BeginGroup();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + column);
+
+    if (message.metadata.compactionDropped > 0) {
+        const FontScope font(fonts_.caption);
+        const ColorScope color(ImGuiCol_Text, kWarning);
+        ImGui::Text("Context compacted — %d earlier messages summarised",
                     message.metadata.compactionDropped);
-        ImGui::PopStyleColor();
-        if (fonts_.caption) ImGui::PopFont();
-        verticalSpace(4.0f);
+        space(kSpace2);
     }
 
     for (const Part& part : message.parts) {
         switch (part.kind) {
             case PartKind::Text:
-                if (!part.text.empty()) drawMarkdown(part.text);
+                if (!part.text.empty()) drawMarkdown(part.text, column);
                 break;
             case PartKind::Reasoning:
                 if (!part.text.empty()) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, kTextFaint);
-                    ImGui::TextWrapped("%s", part.text.c_str());
-                    ImGui::PopStyleColor();
+                    const FontScope font(fonts_.caption);
+                    wrapped(part.text, kTextFaint);
                 }
                 break;
             case PartKind::Tool:
-                drawToolCall(part.tool);
+                drawToolCall(part.tool, column);
                 break;
         }
     }
 
     if (!message.errorText.empty()) {
-        verticalSpace(4.0f);
-        ImGui::PushStyleColor(ImGuiCol_Text, kDanger);
-        ImGui::TextWrapped("%s", message.errorText.c_str());
-        ImGui::PopStyleColor();
+        space(kSpace2);
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            origin, ImVec2(origin.x + 2.0f, origin.y + ImGui::GetTextLineHeight()),
+            ImGui::GetColorU32(kDanger), 1.0f);
+        ImGui::Indent(kSpace2);
+        wrapped(message.errorText, kDanger);
+        ImGui::Unindent(kSpace2);
     }
 
     // Footer: what the turn cost and how full the window is.
     const TurnMetadata& meta = message.metadata;
-    if (!isUser && !message.streaming && (meta.hasUsage || meta.durationMs > 0)) {
-        verticalSpace(4.0f);
+    if (!message.streaming && (meta.hasUsage || meta.durationMs > 0)) {
+        space(kSpace2);
         std::string footer;
         if (meta.durationMs > 0) footer += formatDuration(meta.durationMs);
         if (meta.hasUsage) {
-            if (!footer.empty()) footer += "  ";
-            footer += humanCount(meta.inputTokens) + " in / " + humanCount(meta.outputTokens) + " out";
+            if (!footer.empty()) footer += "   ";
+            footer += humanCount(meta.inputTokens) + " in · " + humanCount(meta.outputTokens) + " out";
         }
         if (meta.contextWindow > 0) {
             const int percent =
                 static_cast<int>(100.0 * static_cast<double>(meta.contextEstimatedTokens) /
                                  static_cast<double>(meta.contextWindow));
-            footer += "  ctx " + std::to_string(percent) + "%";
+            footer += "   ctx " + std::to_string(percent) + "%";
         }
-        if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-        ImGui::PushStyleColor(ImGuiCol_Text, kTextFaint);
-        ImGui::TextUnformatted(footer.c_str());
-        ImGui::PopStyleColor();
-        if (fonts_.caption) ImGui::PopFont();
+        const FontScope font(fonts_.caption);
+        text(footer, kTextFaint);
     }
 
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
+    ImGui::PopTextWrapPos();
+    ImGui::EndGroup();
 }
 
-void App::drawToolCall(const ToolCall& tool) {
-    ImVec4 color = kTextMuted;
-    switch (tool.state) {
-        case ToolState::OutputAvailable: color = kSuccess; break;
-        case ToolState::OutputError: color = kDanger; break;
-        case ToolState::InputAvailable: color = kWarning; break;
-        case ToolState::InputStreaming: color = kTextFaint; break;
-    }
+void App::drawToolCall(const ToolCall& tool, float column) {
+    const bool expanded = expandedTools_.count(tool.toolCallId) > 0;
+    const ImVec4 dotColor = toolStateColor(tool.state);
 
-    verticalSpace(4.0f);
+    space(kSpace2);
     ImGui::PushID(tool.toolCallId.c_str());
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanel);
-    ImGui::BeginChild("##tool", ImVec2(0, 0),
+
+    const ColorScope background(ImGuiCol_ChildBg, expanded ? kSurface : withAlpha(kSurface, 0.55f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kSpace3, kSpace2 + 1.0f));
+    ImGui::BeginChild("##tool", ImVec2(column, 0),
                       ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding |
                           ImGuiChildFlags_Borders);
 
-    statusDot(color);
-    ImGui::TextUnformatted(tool.toolName.c_str());
-    ImGui::SameLine(0.0f, 10.0f);
+    // ---- header row: dot, name, argument, timing -------------------------
+    const float innerWidth = ImGui::GetContentRegionAvail().x;
+    statusDot(dotColor, 0.20f);
 
-    const bool expanded = expandedTools_.count(tool.toolCallId) > 0;
-    if (fonts_.mono) ImGui::PushFont(fonts_.mono);
-    ImGui::PushStyleColor(ImGuiCol_Text, kTextMuted);
-    const std::string summary = splitLines(toolSummary(tool)).front();
-    ImGui::TextUnformatted(summary.substr(0, 110).c_str());
-    ImGui::PopStyleColor();
-    if (fonts_.mono) ImGui::PopFont();
+    {
+        const FontScope font(fonts_.medium);
+        text(tool.toolName, kText);
+    }
+    ImGui::SameLine(0.0f, kSpace2);
 
-    ImGui::SameLine();
-    const char* toggle = expanded ? "hide" : "details";
-    const float toggleWidth = ImGui::CalcTextSize(toggle).x + ImGui::GetStyle().FramePadding.x * 2.0f;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - toggleWidth);
-    if (ghostButton(toggle)) {
-        if (expanded) expandedTools_.erase(tool.toolCallId);
-        else expandedTools_.insert(tool.toolCallId);
+    std::string timing;
+    if (tool.finishedMs > 0 && tool.startedMs > 0 && tool.finishedMs >= tool.startedMs) {
+        timing = formatDuration(tool.finishedMs - tool.startedMs);
+    }
+    const float timingWidth = timing.empty() ? 0.0f : ImGui::CalcTextSize(timing.c_str()).x + kSpace3;
+
+    {
+        const FontScope font(fonts_.mono);
+        const float used = ImGui::GetCursorPosX();
+        const float room = innerWidth - used + kSpace3 - timingWidth;
+        text(elide(splitLines(toolSummary(tool)).front(), room), kTextMuted);
     }
 
-    if (tool.state == ToolState::OutputAvailable || tool.state == ToolState::OutputError) {
-        if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-        ImGui::PushStyleColor(ImGuiCol_Text, tool.state == ToolState::OutputError ? kDanger : kTextFaint);
-        ImGui::TextWrapped("%s", splitLines(toolResultPreview(tool)).front().substr(0, 300).c_str());
-        ImGui::PopStyleColor();
-        if (fonts_.caption) ImGui::PopFont();
+    if (!timing.empty()) {
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(innerWidth - ImGui::CalcTextSize(timing.c_str()).x + kSpace3);
+        const FontScope font(fonts_.caption);
+        text(timing, kTextFaint);
+    }
+
+    // ---- result line, with the disclosure toggle riding its right edge ----
+    // Giving the toggle its own row cost a line of vertical space in every
+    // card, and a card is the most repeated element on the screen.
+    {
+        const FontScope font(fonts_.caption);
+        const char* toggleLabel = expanded ? "Hide" : "Details";
+        const float toggleWidth = ImGui::CalcTextSize(toggleLabel).x + kSpace3;
+        const bool settled =
+            tool.state == ToolState::OutputAvailable || tool.state == ToolState::OutputError;
+
+        if (settled) {
+            const std::string preview = splitLines(toolResultPreview(tool)).front();
+            text(elide(preview, innerWidth - toggleWidth - kSpace3),
+                 tool.state == ToolState::OutputError ? kDanger : kTextFaint);
+            ImGui::SameLine();
+        }
+
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - toggleWidth);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(kSpace2 * 0.5f, 1.0f));
+        if (ghostButton(toggleLabel)) {
+            if (expanded) expandedTools_.erase(tool.toolCallId);
+            else expandedTools_.insert(tool.toolCallId);
+        }
+        ImGui::PopStyleVar();
     }
 
     if (expanded) {
-        ImGui::Separator();
-        textMuted("input");
-        if (fonts_.mono) ImGui::PushFont(fonts_.mono);
-        ImGui::TextWrapped("%s", tool.input.dump(2).c_str());
-        if (fonts_.mono) ImGui::PopFont();
+        space(kSpace1);
+        hairline();
+        space(kSpace2);
+
+        {
+            const FontScope font(fonts_.caption);
+            text("INPUT", kTextFaint);
+        }
+        {
+            const FontScope font(fonts_.mono);
+            wrapped(tool.input.dump(2), kTextMuted);
+        }
 
         if (tool.state == ToolState::OutputAvailable) {
-            textMuted("output");
-            if (fonts_.mono) ImGui::PushFont(fonts_.mono);
-            ImGui::TextWrapped("%s", truncateForModel(tool.output.dump(2), 4000).c_str());
-            if (fonts_.mono) ImGui::PopFont();
+            space(kSpace2);
+            {
+                const FontScope font(fonts_.caption);
+                text("OUTPUT", kTextFaint);
+            }
+            const FontScope font(fonts_.mono);
+            wrapped(truncateForModel(tool.output.dump(2), 4000), kTextMuted);
         } else if (tool.state == ToolState::OutputError) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kDanger);
-            ImGui::TextWrapped("%s", tool.errorText.c_str());
-            ImGui::PopStyleColor();
+            space(kSpace2);
+            const FontScope font(fonts_.mono);
+            wrapped(tool.errorText, kDanger);
         }
     }
 
     ImGui::EndChild();
-    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
     ImGui::PopID();
+    space(kSpace1);
 }
 
-void App::drawMarkdown(const std::string& text) {
+void App::drawMarkdown(const std::string& value, float column) {
     size_t position = 0;
     int blockIndex = 0;
 
     const auto drawProse = [](const std::string& chunk) {
         const std::string trimmed = trim(chunk);
-        if (!trimmed.empty()) ImGui::TextWrapped("%s", trimmed.c_str());
+        if (!trimmed.empty()) ImGui::TextUnformatted(trimmed.c_str());
     };
 
-    while (position < text.size()) {
-        const size_t fence = text.find("```", position);
+    while (position < value.size()) {
+        const size_t fence = value.find("```", position);
         if (fence == std::string::npos) {
-            drawProse(text.substr(position));
+            drawProse(value.substr(position));
             break;
         }
-        if (fence > position) drawProse(text.substr(position, fence - position));
+        if (fence > position) drawProse(value.substr(position, fence - position));
 
-        const size_t headerEnd = text.find('\n', fence);
+        const size_t headerEnd = value.find('\n', fence);
         if (headerEnd == std::string::npos) {
-            drawProse(text.substr(fence));
+            drawProse(value.substr(fence));
             break;
         }
-        const std::string language = trim(text.substr(fence + 3, headerEnd - fence - 3));
-        const size_t close = text.find("```", headerEnd + 1);
-        const std::string code =
-            text.substr(headerEnd + 1, (close == std::string::npos ? text.size() : close) - headerEnd - 1);
+        const std::string language = trim(value.substr(fence + 3, headerEnd - fence - 3));
+        const size_t close = value.find("```", headerEnd + 1);
+        const std::string code = value.substr(
+            headerEnd + 1, (close == std::string::npos ? value.size() : close) - headerEnd - 1);
 
         ImGui::PushID(blockIndex++);
-        verticalSpace(4.0f);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, kBackground);
-        ImGui::BeginChild("##code", ImVec2(0, 0),
-                          ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding |
-                              ImGuiChildFlags_Borders,
-                          ImGuiWindowFlags_HorizontalScrollbar);
+        space(kSpace3);
 
-        if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-        textMuted(language.empty() ? "code" : language);
-        if (fonts_.caption) ImGui::PopFont();
+        const ColorScope background(ImGuiCol_ChildBg, kCanvas);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::BeginChild("##code", ImVec2(column, 0),
+                          ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders);
+
+        // Header strip: language on the left, copy on the right.
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
+        ImGui::SetCursorPos(ImVec2(kSpace3, kSpace2 - 2.0f));
+        {
+            const FontScope font(fonts_.caption);
+            text(language.empty() ? "code" : language, kTextFaint);
+        }
         ImGui::SameLine();
-        const float copyWidth = ImGui::CalcTextSize("copy").x + ImGui::GetStyle().FramePadding.x * 2.0f;
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - copyWidth);
-        if (ghostButton("copy")) ImGui::SetClipboardText(code.c_str());
+        {
+            const FontScope font(fonts_.caption);
+            const float copyWidth = ImGui::CalcTextSize("Copy").x + kSpace3;
+            ImGui::SetCursorPosX(column - copyWidth - kSpace2);
+            ImGui::SetCursorPosY(kSpace2 - 4.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(kSpace2 * 0.5f, 2.0f));
+            if (ghostButton("Copy")) {
+                ImGui::SetClipboardText(code.c_str());
+                toast("Copied to clipboard.");
+            }
+            ImGui::PopStyleVar();
+        }
+        ImGui::PopStyleVar();
 
-        if (fonts_.mono) ImGui::PushFont(fonts_.mono);
-        ImGui::TextUnformatted(code.c_str());
-        if (fonts_.mono) ImGui::PopFont();
+        ImGui::SetCursorPosX(kSpace3);
+        hairline(0.0f);
+        space(kSpace2);
+
+        ImGui::SetCursorPosX(kSpace3);
+        ImGui::BeginChild("##codebody", ImVec2(column - kSpace3, 0),
+                          ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_HorizontalScrollbar);
+        {
+            const FontScope font(fonts_.mono);
+            const ColorScope color(ImGuiCol_Text, kText);
+            ImGui::TextUnformatted(code.c_str());
+        }
+        ImGui::EndChild();
+        space(kSpace2);
 
         ImGui::EndChild();
-        ImGui::PopStyleColor();
-        verticalSpace(4.0f);
+        ImGui::PopStyleVar();
+        space(kSpace3);
         ImGui::PopID();
 
         if (close == std::string::npos) break;
         position = close + 3;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Composer
+// ---------------------------------------------------------------------------
 
 void App::drawComposer() {
     bool streaming = false;
@@ -567,121 +912,197 @@ void App::drawComposer() {
         streaming = streaming_;
     }
 
+    const float available = ImGui::GetContentRegionAvail().x;
+    const float column = std::min(available - kSpace5 * 2.0f, kContentMaxWidth);
+    const float inset = std::max(kSpace5, (available - column) * 0.5f);
+
+    ImGui::SetCursorPosX(inset);
+
+    const ImVec2 cardOrigin = ImGui::GetCursorScreenPos();
+    const float inputHeight = ImGui::GetTextLineHeight() * 3.0f;
+    const float cardHeight = inputHeight + 34.0f + kSpace3 * 2.0f;
+
+    const ColorScope background(ImGuiCol_ChildBg, kSurface);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kSpace3, kSpace3));
+    ImGui::BeginChild("##composerCard", ImVec2(column, cardHeight),
+                      ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_Borders);
+
     if (focusComposer_ && !ImGui::IsAnyItemActive()) {
         ImGui::SetKeyboardFocusHere();
         focusComposer_ = false;
     }
 
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, kPanel);
-    const bool submitted = ImGui::InputTextMultiline(
-        "##composer", composerBuffer_.data(), composerBuffer_.size(),
-        ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 3.6f),
-        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CtrlEnterForNewLine);
-    ImGui::PopStyleColor();
-
-    // ---- controls row ----------------------------------------------------
-    const bool planMode = settings_.mode == "PLAN";
-    ImGui::BeginDisabled(streaming);
-    // Stable widget id: without the "##mode" suffix the label *is* the id, so
-    // toggling the mode would change the id and shuffle keyboard focus.
-    if (ImGui::Button(planMode ? "PLAN##mode" : "BUILD##mode", ImVec2(84, 0))) {
-        settings_.mode = planMode ? "BUILD" : "PLAN";
-        settings_.save();
-    }
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(planMode ? "PLAN: read-only tools. Click for BUILD."
-                                   : "BUILD: writes and shell enabled. Click for PLAN.");
-    }
-
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(220.0f);
-    ImGui::BeginDisabled(streaming);
-    if (ImGui::BeginCombo("##model", std::string(modelDisplayName(settings_.model)).c_str())) {
-        for (const ModelInfo& model : kModels) {
-            if (model.id.empty()) continue;
-            const std::string id(model.id);
-            const bool selected = id == settings_.model;
-            if (ImGui::Selectable(std::string(model.displayName).c_str(), selected)) {
-                settings_.model = id;
-                settings_.save();
+    // The text area is styled to disappear into the card; the card is the
+    // control, which is why the focus ring is drawn around the card below.
+    {
+        const ColorScope frame(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::InputTextMultiline("##composer", composerBuffer_.data(), composerBuffer_.size(),
+                                      ImVec2(-FLT_MIN, inputHeight),
+                                      ImGuiInputTextFlags_EnterReturnsTrue |
+                                          ImGuiInputTextFlags_CtrlEnterForNewLine) &&
+            !streaming) {
+            const std::string value(composerBuffer_.data());
+            if (!trim(value).empty()) {
+                submit(value);
+                composerBuffer_.assign(composerBuffer_.size(), '\0');
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", std::string(model.note).c_str());
-            if (selected) ImGui::SetItemDefaultFocus();
+            focusComposer_ = true;
         }
-        ImGui::EndCombo();
+        ImGui::PopStyleVar(2);
     }
-    ImGui::EndDisabled();
+    const bool inputActive = ImGui::IsItemActive();
+
+    // Placeholder, drawn over the empty input.
+    if (composerBuffer_[0] == '\0' && !inputActive) {
+        const ImVec2 min = ImGui::GetItemRectMin();
+        ImGui::GetWindowDrawList()->AddText(ImVec2(min.x + 1.0f, min.y),
+                                           ImGui::GetColorU32(kTextFaint),
+                                           "Ask anything, or describe a change\xE2\x80\xA6");
+    }
+
+    // ---- action row ------------------------------------------------------
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + kSpace2);
+    {
+        const FontScope font(fonts_.caption);
+        text(streaming ? "Working\xE2\x80\xA6 press Stop to interrupt"
+                       : "Enter to send · Ctrl+Enter for a new line",
+             kTextFaint);
+    }
 
     ImGui::SameLine();
-    if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-    textMuted("Enter to send - Ctrl+Enter for a new line");
-    if (fonts_.caption) ImGui::PopFont();
-
-    ImGui::SameLine();
-    const char* actionLabel = streaming ? "Stop" : "Send";
-    const float actionWidth = 96.0f;
+    const float actionWidth = 92.0f;
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - actionWidth);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - kSpace1);
 
-    bool send = false;
     if (streaming) {
-        ImGui::PushStyleColor(ImGuiCol_Button, kDanger);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, withAlpha(kDanger, 0.85f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
-        if (ImGui::Button(actionLabel, ImVec2(actionWidth, 0))) stopTurn();
-        ImGui::PopStyleColor(3);
+        if (dangerButton("Stop", ImVec2(actionWidth, 30.0f))) stopTurn();
     } else {
-        send = accentButton(actionLabel, ImVec2(actionWidth, 0));
+        const FontScope font(fonts_.medium);
+        if (primaryButton("Send", ImVec2(actionWidth, 30.0f))) {
+            const std::string value(composerBuffer_.data());
+            if (!trim(value).empty()) {
+                submit(value);
+                composerBuffer_.assign(composerBuffer_.size(), '\0');
+            }
+            focusComposer_ = true;
+        }
     }
 
-    if ((submitted || send) && !streaming) {
-        const std::string text(composerBuffer_.data());
-        if (!trim(text).empty()) {
-            submit(text);
-            composerBuffer_.assign(composerBuffer_.size(), '\0');
-        }
-        focusComposer_ = true;
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+
+    // Focus ring around the whole card.
+    if (inputActive) {
+        ImGui::GetWindowDrawList()->AddRect(cardOrigin,
+                                            ImVec2(cardOrigin.x + column, cardOrigin.y + cardHeight),
+                                            ImGui::GetColorU32(withAlpha(kAccent, 0.55f)), kRadiusLg,
+                                            0, 1.0f);
     }
 }
 
 void App::drawStatusBar() {
-    if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-    ImGui::PushStyleColor(ImGuiCol_Text, kTextFaint);
+    ImGui::SetCursorPosX(0.0f);
+    hairline();
+    ImGui::SetCursorPosX(kSpace5);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + kSpace1);
 
-    std::string line = settings_.apiUrl + "   " + settings_.projectDir;
-    if (settings_.autoApproveWrites) line += "   writes auto-approved";
-    if (settings_.autoApproveBash) line += "   shell auto-approved";
-    ImGui::TextUnformatted(line.c_str());
+    const FontScope font(fonts_.caption);
 
-    ImGui::PopStyleColor();
-    if (fonts_.caption) ImGui::PopFont();
+    std::string line = settings_.projectDir;
+    const float budget = ImGui::GetContentRegionAvail().x * 0.45f;
+    line = elide(line, budget);
+
+    const bool localApi = settings_.apiUrl.find("localhost") != std::string::npos ||
+                          settings_.apiUrl.find("127.0.0.1") != std::string::npos;
+    statusDot(localApi ? kWarning : kSuccess, 0.16f);
+    text(line, kTextFaint);
+
+    ImGui::SameLine(0.0f, kSpace3);
+    text("·", kTextFaint);
+    ImGui::SameLine(0.0f, kSpace3);
+    text(settings_.apiUrl, kTextFaint);
+
+    // Only surface the auto-approve toggles when they are on — the interesting
+    // state is the loosened one.
+    std::string relaxed;
+    if (settings_.autoApproveWrites) relaxed += "writes";
+    if (settings_.autoApproveBash) relaxed += relaxed.empty() ? "shell" : ", shell";
+    if (settings_.autoApproveWeb) relaxed += relaxed.empty() ? "web" : ", web";
+    if (!relaxed.empty()) {
+        ImGui::SameLine(0.0f, kSpace3);
+        text("·", kTextFaint);
+        ImGui::SameLine(0.0f, kSpace3);
+        text("auto-approving " + relaxed, kWarning);
+    }
 }
 
-void App::drawEmptyState() {
-    verticalSpace(ImGui::GetContentRegionAvail().y * 0.28f);
-    if (fonts_.heading) ImGui::PushFont(fonts_.heading);
-    ImGui::PushStyleColor(ImGuiCol_Text, kTextMuted);
-    ImGui::TextUnformatted("What are we building?");
-    ImGui::PopStyleColor();
-    if (fonts_.heading) ImGui::PopFont();
+// ---------------------------------------------------------------------------
+// Empty and signed-out states
+// ---------------------------------------------------------------------------
 
-    verticalSpace(6.0f);
-    wrappedMuted("Tools run on this machine, against " + settings_.projectDir +
-                 ". PLAN mode keeps them read-only; BUILD mode allows writes and shell commands.");
+void App::drawEmptyState() {
+    const float available = ImGui::GetContentRegionAvail().x;
+    const float column = std::min(available - kSpace5 * 2.0f, kContentMaxWidth);
+    const float inset = std::max(kSpace5, (available - column) * 0.5f);
+
+    // Roughly optically centred: the block below is about 260px tall.
+    space(std::max(kSpace6, (ImGui::GetContentRegionAvail().y - 260.0f) * 0.40f));
+
+    ImGui::SetCursorPosX(inset);
+    {
+        const FontScope font(fonts_.display);
+        text("What are we building?", kText);
+    }
+
+    space(kSpace2);
+    ImGui::SetCursorPosX(inset);
+    ImGui::PushTextWrapPos(inset + column);
+    wrapped("Tools run on this machine against " + settings_.projectDir +
+                ". PLAN keeps them read-only; BUILD allows writes and shell commands.",
+            kTextMuted);
+    ImGui::PopTextWrapPos();
+
+    space(kSpace5);
+    for (const char* suggestion : kSuggestions) {
+        ImGui::SetCursorPosX(inset);
+        ImGui::PushID(suggestion);
+        const ColorScope colors(ImGuiCol_Button, withAlpha(kSurface, 0.7f), ImGuiCol_ButtonHovered,
+                                kSurfaceHover, ImGuiCol_Text, kTextMuted);
+        if (ImGui::Button(suggestion, ImVec2(column, 32.0f))) {
+            std::snprintf(composerBuffer_.data(), composerBuffer_.size(), "%s", suggestion);
+            focusComposer_ = true;
+        }
+        ImGui::PopID();
+        space(kSpace2);
+    }
 }
 
 void App::drawSignedOutState() {
-    verticalSpace(ImGui::GetContentRegionAvail().y * 0.25f);
-    if (fonts_.heading) ImGui::PushFont(fonts_.heading);
-    ImGui::TextUnformatted("Sign in to DarkCode");
-    if (fonts_.heading) ImGui::PopFont();
+    const float available = ImGui::GetContentRegionAvail().x;
+    const float column = std::min(available - kSpace5 * 2.0f, 460.0f);
+    const float inset = std::max(kSpace5, (available - column) * 0.5f);
 
-    verticalSpace(8.0f);
-    wrappedMuted("The desktop app reads the same credentials as the CLI. In a terminal, run "
-                 "darkcode and use /login, then come back here.");
-    verticalSpace(12.0f);
+    space(ImGui::GetContentRegionAvail().y * 0.28f);
+    ImGui::SetCursorPosX(inset);
+    {
+        const FontScope font(fonts_.display);
+        text("Sign in to DarkCode", kText);
+    }
 
-    if (accentButton("I have signed in")) {
+    space(kSpace3);
+    ImGui::SetCursorPosX(inset);
+    ImGui::PushTextWrapPos(inset + column);
+    wrapped("The desktop app reads the same credentials as the CLI. In a terminal, run darkcode "
+            "and use /login, then come back here.",
+            kTextMuted);
+    ImGui::PopTextWrapPos();
+
+    space(kSpace5);
+    ImGui::SetCursorPosX(inset);
+    if (primaryButton("I have signed in", ImVec2(170.0f, 34.0f))) {
         api_.reloadAuthFromDisk();
         signedIn_ = api_.signedIn();
         if (signedIn_) {
@@ -692,9 +1113,13 @@ void App::drawSignedOutState() {
             toast("No credentials found in " + authFilePath(), true);
         }
     }
-    ImGui::SameLine();
-    if (ghostButton("Settings")) showSettings_ = true;
+    ImGui::SameLine(0.0f, kSpace2);
+    if (ghostButton("Settings", ImVec2(110.0f, 34.0f))) showSettings_ = true;
 }
+
+// ---------------------------------------------------------------------------
+// Modals
+// ---------------------------------------------------------------------------
 
 void App::drawPermissionModal() {
     static bool wasOpen = false;
@@ -720,56 +1145,95 @@ void App::drawPermissionModal() {
 
     ImGui::SetNextWindowSize(ImVec2(620, 0), ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kSpace5, kSpace5));
+    const ColorScope background(ImGuiCol_PopupBg, kSurface);
+
     if (ImGui::BeginPopupModal("Permission required", nullptr,
-                               ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
-        if (fonts_.heading) ImGui::PushFont(fonts_.heading);
-        ImGui::TextUnformatted(request.title.c_str());
-        if (fonts_.heading) ImGui::PopFont();
-
-        verticalSpace(6.0f);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, kBackground);
-        ImGui::BeginChild("##subject", ImVec2(0, 0),
-                          ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding |
-                              ImGuiChildFlags_Borders);
-        if (fonts_.mono) ImGui::PushFont(fonts_.mono);
-        ImGui::TextWrapped("%s", request.subject.c_str());
-        if (fonts_.mono) ImGui::PopFont();
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-
-        if (!request.detail.empty()) {
-            verticalSpace(6.0f);
-            const char* detailLabel = "new contents (preview)";
-            if (request.kind == PermissionKind::Bash) detailLabel = "context";
-            else if (request.kind == PermissionKind::Web) detailLabel = "about this request";
-            textMuted(detailLabel);
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, kBackground);
-            ImGui::BeginChild("##detail", ImVec2(0, 180),
-                              ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_Borders,
-                              ImGuiWindowFlags_HorizontalScrollbar);
-            if (fonts_.mono) ImGui::PushFont(fonts_.mono);
-            ImGui::TextUnformatted(truncateForModel(request.detail, 8000).c_str());
-            if (fonts_.mono) ImGui::PopFont();
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
+                               ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                   ImGuiWindowFlags_NoTitleBar)) {
+        {
+            const FontScope font(fonts_.caption);
+            text("PERMISSION REQUIRED", kAccent);
+        }
+        space(kSpace2);
+        {
+            const FontScope font(fonts_.heading);
+            text(request.title, kText);
         }
 
-        verticalSpace(10.0f);
+        space(kSpace3);
+        {
+            const ColorScope subject(ImGuiCol_ChildBg, kCanvas);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kSpace3, kSpace3));
+            ImGui::BeginChild("##subject", ImVec2(0, 0),
+                              ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding |
+                                  ImGuiChildFlags_Borders);
+            // Scoped so the pop happens inside this child. ImGui balances its
+            // stacks per window, so a guard that outlives EndChild pops into
+            // the wrong one.
+            {
+                const FontScope font(fonts_.mono);
+                wrapped(request.subject, kText);
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
+        }
+
+        if (!request.detail.empty()) {
+            space(kSpace3);
+            const char* detailLabel = "NEW CONTENTS";
+            if (request.kind == PermissionKind::Bash) detailLabel = "CONTEXT";
+            else if (request.kind == PermissionKind::Web) detailLabel = "ABOUT THIS REQUEST";
+            {
+                const FontScope font(fonts_.caption);
+                text(detailLabel, kTextFaint);
+            }
+            space(kSpace1);
+
+            // A short explanation gets a box that fits it; a file preview gets a
+            // fixed, scrollable one. A one-line sentence in a 160px well looks
+            // like something failed to load.
+            const bool brief = request.detail.size() < 240 &&
+                               request.detail.find('\n') == std::string::npos;
+
+            const ColorScope detail(ImGuiCol_ChildBg, kCanvas);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kSpace3, kSpace3));
+            ImGui::BeginChild("##detail", ImVec2(0, brief ? 0.0f : 180.0f),
+                              (brief ? ImGuiChildFlags_AutoResizeY : ImGuiChildFlags_None) |
+                                  ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_Borders,
+                              brief ? ImGuiWindowFlags_None : ImGuiWindowFlags_HorizontalScrollbar);
+            {
+                const FontScope font(fonts_.mono);
+                const ColorScope color(ImGuiCol_Text, kTextMuted);
+                if (brief) {
+                    ImGui::PushTextWrapPos(0.0f);
+                    ImGui::TextUnformatted(request.detail.c_str());
+                    ImGui::PopTextWrapPos();
+                } else {
+                    ImGui::TextUnformatted(truncateForModel(request.detail, 8000).c_str());
+                }
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
+        }
+
+        space(kSpace5);
         ImGui::BeginDisabled(!armed);
 
-        if (accentButton("Allow once", ImVec2(140, 0)) && armed) {
+        if (primaryButton("Allow once", ImVec2(130, 32)) && armed) {
             permissions_.resolve(PermissionDecision::AllowOnce);
             ImGui::CloseCurrentPopup();
         }
-        ImGui::SameLine();
-        if (ImGui::Button(request.sessionLabel.c_str()) && armed) {
+        ImGui::SameLine(0.0f, kSpace2);
+        if (secondaryButton(request.sessionLabel.c_str(), ImVec2(0, 32)) && armed) {
             permissions_.resolve(PermissionDecision::AllowSession);
             ImGui::CloseCurrentPopup();
         }
+
         ImGui::SameLine();
-        const float denyWidth = 100.0f;
+        const float denyWidth = 92.0f;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - denyWidth);
-        const bool denied = ImGui::Button("Deny", ImVec2(denyWidth, 0));
+        const bool denied = dangerButton("Deny", ImVec2(denyWidth, 32));
         // Deny is the default-focused item: if keyboard navigation does answer
         // this dialog, it must answer it the safe way.
         ImGui::SetItemDefaultFocus();
@@ -781,35 +1245,52 @@ void App::drawPermissionModal() {
         ImGui::EndDisabled();
         ImGui::EndPopup();
     }
+    ImGui::PopStyleVar();
 }
 
 void App::drawSettingsWindow() {
-    ImGui::SetNextWindowSize(ImVec2(640, 620), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(600, 640), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_FirstUseEver,
                             ImVec2(0.5f, 0.5f));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, kPanel);
+    const ColorScope background(ImGuiCol_WindowBg, kSurface);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kSpace5, kSpace5));
+
     if (ImGui::Begin("Settings", &showSettings_, ImGuiWindowFlags_NoCollapse)) {
-        ImGui::SeparatorText("Connection");
-        ImGui::TextUnformatted("API URL");
+        const auto sectionLabel = [this](const char* value) {
+            space(kSpace3);
+            const FontScope font(fonts_.caption);
+            text(value, kTextFaint);
+            space(kSpace1);
+        };
+        const auto fieldLabel = [this](const char* value) {
+            const FontScope font(fonts_.medium);
+            text(value, kText);
+        };
+
+        sectionLabel("CONNECTION");
+        fieldLabel("API URL");
         ImGui::SetNextItemWidth(-FLT_MIN);
         ImGui::InputText("##apiUrl", apiUrlBuffer_.data(), apiUrlBuffer_.size());
         if (settings_.apiUrlFromEnv) {
-            if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-            ImGui::PushStyleColor(ImGuiCol_Text, kWarning);
-            ImGui::TextWrapped("DARKCODE_API_URL is set, so this session talks to %s. The value above "
-                               "is what will be used once that variable is gone.",
-                               settings_.apiUrl.c_str());
-            ImGui::PopStyleColor();
-            if (fonts_.caption) ImGui::PopFont();
+            const FontScope font(fonts_.caption);
+            ImGui::PushTextWrapPos(0.0f);
+            wrapped("DARKCODE_API_URL is set, so this session talks to " + settings_.apiUrl +
+                        ". The value above applies once that variable is gone.",
+                    kWarning);
+            ImGui::PopTextWrapPos();
         }
 
-        ImGui::TextUnformatted("Project directory (tools resolve paths against this)");
-        const float browseWidth = 110.0f;
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - browseWidth -
-                                ImGui::GetStyle().ItemSpacing.x);
+        space(kSpace3);
+        fieldLabel("Project directory");
+        {
+            const FontScope font(fonts_.caption);
+            text("Every tool resolves paths against this, and cannot escape it.", kTextFaint);
+        }
+        const float browseWidth = 100.0f;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - browseWidth - kSpace2);
         ImGui::InputText("##projectDir", projectDirBuffer_.data(), projectDirBuffer_.size());
-        ImGui::SameLine();
-        if (ImGui::Button("Browse...", ImVec2(browseWidth, 0))) {
+        ImGui::SameLine(0.0f, kSpace2);
+        if (secondaryButton("Browse\xE2\x80\xA6", ImVec2(browseWidth, 0))) {
             const std::string chosen = browseForFolder(trim(projectDirBuffer_.data()));
             if (!chosen.empty()) {
                 std::snprintf(projectDirBuffer_.data(), projectDirBuffer_.size(), "%s", chosen.c_str());
@@ -817,43 +1298,55 @@ void App::drawSettingsWindow() {
         }
 
         if (findBashPath().empty()) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kWarning);
-            ImGui::TextWrapped("bash was not found. The shell tool needs Git for Windows installed.");
-            ImGui::PopStyleColor();
+            space(kSpace2);
+            const FontScope font(fonts_.caption);
+            ImGui::PushTextWrapPos(0.0f);
+            wrapped("bash was not found. The shell tool needs Git for Windows installed.", kWarning);
+            ImGui::PopTextWrapPos();
         }
 
-        ImGui::SeparatorText("Permissions");
-        ImGui::Checkbox("Auto-approve file reads", &settings_.autoApproveReads);
-        ImGui::Checkbox("Auto-approve file writes", &settings_.autoApproveWrites);
-        ImGui::Checkbox("Auto-approve shell commands", &settings_.autoApproveBash);
-        ImGui::Checkbox("Auto-approve web fetches", &settings_.autoApproveWeb);
-        if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-        wrappedMuted("Secrets (.env, keys, ~/.ssh, credential stores) are refused whatever these say. "
-                     "So are destructive shell commands and cloud metadata endpoints.");
-        if (fonts_.caption) ImGui::PopFont();
+        sectionLabel("PERMISSIONS");
+        compactCheckbox("Auto-approve file reads", &settings_.autoApproveReads);
+        compactCheckbox("Auto-approve file writes", &settings_.autoApproveWrites);
+        compactCheckbox("Auto-approve shell commands", &settings_.autoApproveBash);
+        compactCheckbox("Auto-approve web fetches", &settings_.autoApproveWeb);
+        {
+            const FontScope font(fonts_.caption);
+            ImGui::PushTextWrapPos(0.0f);
+            wrapped("Secrets (.env, keys, ~/.ssh, credential stores) are refused whatever these say. "
+                    "So are destructive shell commands and cloud metadata endpoints.",
+                    kTextFaint);
+            ImGui::PopTextWrapPos();
+        }
 
-        ImGui::SeparatorText("Context");
-        ImGui::Checkbox("Send project context (git branch, AGENTS.md / CLAUDE.md)",
+        sectionLabel("CONTEXT");
+        compactCheckbox("Send project context (git branch, AGENTS.md / CLAUDE.md)",
                         &settings_.sendProjectContext);
 
-        ImGui::SeparatorText("API keys (BYOK)");
-        if (fonts_.caption) ImGui::PushFont(fonts_.caption);
-        wrappedMuted("Stored in ~/.darkcode/api-keys.json, shared with the CLI. A key of your own is "
-                     "never metered as credits.");
-        if (fonts_.caption) ImGui::PopFont();
+        sectionLabel("API KEYS");
+        {
+            const FontScope font(fonts_.caption);
+            ImGui::PushTextWrapPos(0.0f);
+            wrapped("Stored in ~/.darkcode/api-keys.json, shared with the CLI. A key of your own is "
+                    "never metered as credits.",
+                    kTextFaint);
+            ImGui::PopTextWrapPos();
+        }
+        space(kSpace2);
 
         for (size_t i = 0; i < kByokProviders.size(); ++i) {
             ImGui::PushID(static_cast<int>(i));
-            ImGui::TextUnformatted(std::string(kByokProviders[i].label).c_str());
+            fieldLabel(std::string(kByokProviders[i].label).c_str());
             ImGui::SetNextItemWidth(-FLT_MIN);
             ImGui::InputTextWithHint("##key", std::string(kByokProviders[i].placeholder).c_str(),
                                      apiKeyBuffers_[i].data(), apiKeyBuffers_[i].size(),
                                      ImGuiInputTextFlags_Password);
             ImGui::PopID();
+            space(kSpace1);
         }
 
-        ImGui::SeparatorText("Account");
-        if (ImGui::Button("Reload credentials from disk")) {
+        sectionLabel("ACCOUNT");
+        if (secondaryButton("Reload credentials from disk")) {
             api_.reloadAuthFromDisk();
             signedIn_ = api_.signedIn();
             if (signedIn_) {
@@ -861,8 +1354,8 @@ void App::drawSettingsWindow() {
                 refreshCredits();
             }
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Sign out")) {
+        ImGui::SameLine(0.0f, kSpace2);
+        if (dangerButton("Sign out")) {
             std::thread([this] {
                 api_.signOut();
                 signedIn_ = false;
@@ -875,8 +1368,11 @@ void App::drawSettingsWindow() {
             }).detach();
         }
 
-        verticalSpace(12.0f);
-        if (accentButton("Save", ImVec2(120, 0))) {
+        space(kSpace5);
+        hairline();
+        space(kSpace3);
+
+        if (primaryButton("Save", ImVec2(110, 32))) {
             std::string url = trim(apiUrlBuffer_.data());
             while (!url.empty() && url.back() == '/') url.pop_back();
             settings_.apiUrlStored = url;
@@ -895,32 +1391,40 @@ void App::drawSettingsWindow() {
             toast("Settings saved.");
             showSettings_ = false;
         }
-        ImGui::SameLine();
-        if (ghostButton("Close", ImVec2(120, 0))) showSettings_ = false;
+        ImGui::SameLine(0.0f, kSpace2);
+        if (ghostButton("Close", ImVec2(110, 32))) showSettings_ = false;
     }
     ImGui::End();
-    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
 }
 
 void App::drawToast() {
     if (toastText_.empty()) return;
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - 24.0f,
-                                   viewport->WorkPos.y + viewport->WorkSize.y - 24.0f),
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - kSpace5,
+                                   viewport->WorkPos.y + viewport->WorkSize.y - kSpace5),
                             ImGuiCond_Always, ImVec2(1.0f, 1.0f));
-    ImGui::SetNextWindowBgAlpha(0.96f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, toastIsError_ ? ImVec4(0.24f, 0.08f, 0.09f, 1.0f) : kPanelRaised);
+    ImGui::SetNextWindowBgAlpha(0.98f);
+
+    const ColorScope background(ImGuiCol_WindowBg, toastIsError_ ? ImVec4(0.180f, 0.075f, 0.086f, 1.0f)
+                                                                 : kSurface);
+    ImGui::PushStyleColor(ImGuiCol_Border, toastIsError_ ? withAlpha(kDanger, 0.5f) : kBorderStrong);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kSpace3, kSpace3));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+
     ImGui::Begin("##toast", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-    ImGui::PushTextWrapPos(460.0f);
-    ImGui::PushStyleColor(ImGuiCol_Text, toastIsError_ ? kDanger : kText);
-    ImGui::TextWrapped("%s", toastText_.c_str());
-    ImGui::PopStyleColor();
+
+    statusDot(toastIsError_ ? kDanger : kSuccess, 0.18f);
+    ImGui::PushTextWrapPos(420.0f);
+    wrapped(toastText_, toastIsError_ ? kDanger : kText);
     ImGui::PopTextWrapPos();
+
     ImGui::End();
+    ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
 }
 
