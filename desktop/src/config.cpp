@@ -193,6 +193,7 @@ void Settings::load() {
     autoApproveReads = parsed.value("autoApproveReads", autoApproveReads);
     autoApproveWrites = parsed.value("autoApproveWrites", autoApproveWrites);
     autoApproveBash = parsed.value("autoApproveBash", autoApproveBash);
+    autoApproveWeb = parsed.value("autoApproveWeb", autoApproveWeb);
     sendProjectContext = parsed.value("sendProjectContext", sendProjectContext);
     uiScale = parsed.value("uiScale", uiScale);
 
@@ -217,6 +218,7 @@ void Settings::save() const {
     out["autoApproveReads"] = autoApproveReads;
     out["autoApproveWrites"] = autoApproveWrites;
     out["autoApproveBash"] = autoApproveBash;
+    out["autoApproveWeb"] = autoApproveWeb;
     out["sendProjectContext"] = sendProjectContext;
     out["uiScale"] = uiScale;
     writeWholeFile(settingsFilePath(), out.dump(2));

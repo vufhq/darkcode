@@ -82,6 +82,35 @@ The prompt also ignores input for a few frames after it appears and clears the
 queued key events, so a keystroke already in flight cannot answer a security
 question the user has not read yet.
 
+### webFetch
+
+Fetches a URL and hands back Markdown for HTML, pretty-printed JSON for JSON,
+and raw text otherwise. It runs here rather than on the server for one reason:
+the thing a coding agent most often needs to fetch is the dev server it just
+started, and `http://localhost:5173` does not exist from the API server's side.
+
+That same property makes it a server-side-request-forgery primitive aimed at
+your own network, and the model may be choosing the URL because a page it just
+read told it to. Three defences, none of them optional:
+
+- **Every host is approved separately**, default-ask. A grant is keyed to the
+  host, so approving `example.com` says nothing about anywhere else.
+- **Cloud instance-metadata endpoints are refused outright** (`169.254.169.254`,
+  `metadata.google.internal`, …). They hand out credentials to anything on the
+  box that asks. The refusal is not promptable and auto-approve does not reach
+  it.
+- **Redirects are walked by hand, one hop at a time, re-checking the policy at
+  each new host.** Automatic redirect handling would let an approved host bounce
+  the request to a denied one with no second question — which is exactly the
+  attack the first two defences would otherwise miss.
+
+Beyond that: `http`/`https` only (`file:` would bypass the path jail that guards
+every other read), binary content types refused, the body capped at 5 MB as it
+arrives rather than trusting `Content-Length`, and the result carries a note
+telling the model the content is untrusted data rather than instructions.
+
+`webSearch` needs nothing here — it is the one tool that executes server-side.
+
 ## How a turn works
 
 Tool dispatch is client-side — the server only declares schemas — so the desktop
@@ -104,30 +133,31 @@ app runs the same loop the CLI does:
 | `src/ui.cpp` | All rendering |
 | `src/chat.{h,cpp}` | UIMessage model, SSE decoder, stream reducer |
 | `src/tools.{h,cpp}` | Local tool execution, path jail, `.gitignore` walker, bash spawning |
+| `src/web.{h,cpp}` | `webFetch`: URL validation, hop-by-hop redirects, content-type routing |
+| `src/html.{h,cpp}` | HTML→Markdown and entity decoding (no DOM library) |
 | `src/permissions.{h,cpp}` | Deny lists, bash classifier, the blocking prompt handshake |
 | `src/api.{h,cpp}` | `/sessions`, `/chat`, `/billing`, token refresh |
 | `src/http.{h,cpp}` | WinHTTP, including the streaming read loop |
 | `src/models.h` | Mirror of `packages/shared/src/models.ts` |
-| `tests/test_logic.cpp` | 64 checks over the UI-free logic |
+| `tests/test_logic.cpp` | 126 checks over the UI-free logic |
 
 ## Not implemented
 
 - **LSP tools.** `lspDefinition` / `lspReferences` / `lspHover` / `lspDiagnostics`
   / `lspSymbols` return a tool error telling the model to use `grep`/`readFile`.
   The server offers them in both modes, so the model can still call them.
-- **`webFetch`.** Client-dispatched by design (it is what lets the agent reach
-  your local dev server), so the model can call it here and gets a tool error
-  saying it is unavailable. `webSearch` is unaffected — it executes server-side,
-  so it works normally.
 - **MCP.** No `mcpTools` are advertised, so the model is never offered them.
 - **The login flow.** See above.
 - **`/compact`.** The server compacts automatically at 75% of the context window;
   the manual `POST /sessions/:id/compact` is not wired to a button.
 
-Two deliberate approximations: the `.gitignore` matcher covers comments,
+Three deliberate approximations: the `.gitignore` matcher covers comments,
 negation, anchoring, directory-only rules and `**`, but is not the full git
-algorithm; and `editFile` tries an exact match then a line-trimmed fallback,
-where the CLI has a six-strategy chain. Both report when a fallback was used.
+algorithm; `editFile` tries an exact match then a line-trimmed fallback, where
+the CLI has a six-strategy chain (both report when a fallback was used); and the
+HTML converter is a tag scanner rather than a real parser, so it reproduces the
+CLI's *behaviour* — dropped chrome, block structure, fenced code, resolved links,
+collapsed whitespace — without matching it byte for byte on hostile markup.
 
 ## Keeping it in sync
 

@@ -6,8 +6,10 @@
 #include <thread>
 
 #include "chat.h"
+#include "html.h"
 #include "permissions.h"
 #include "util.h"
+#include "web.h"
 
 namespace {
 
@@ -200,6 +202,144 @@ void testPermissionBroker() {
     }
 }
 
+void testEntities() {
+    using dc::decodeHtmlEntities;
+    checkEqual(decodeHtmlEntities("a &amp; b"), "a & b", "named entity");
+    checkEqual(decodeHtmlEntities("&lt;div&gt;"), "<div>", "angle brackets");
+    checkEqual(decodeHtmlEntities("&#65;&#x42;"), "AB", "decimal and hex references");
+    checkEqual(decodeHtmlEntities("&mdash;"), "\xE2\x80\x94", "multi-byte named entity");
+    checkEqual(decodeHtmlEntities("a&nbsp;b"), "a b",
+               "nbsp becomes a plain space, not an invisible U+00A0");
+    checkEqual(decodeHtmlEntities("&unknownthing;"), "&unknownthing;", "unknown entity is left alone");
+    checkEqual(decodeHtmlEntities("100% & rising"), "100% & rising", "bare ampersand survives");
+    checkEqual(decodeHtmlEntities("&#0;"), "&#0;", "NUL reference is refused");
+    checkEqual(decodeHtmlEntities("&#xD800;"), "&#xD800;", "surrogate reference is refused");
+    // The one that is not cosmetic: an undecoded href is a different URL.
+    checkEqual(decodeHtmlEntities("/x?a=1&amp;b=2"), "/x?a=1&b=2", "query separator in an href");
+}
+
+void testResolveUrl() {
+    using dc::resolveUrl;
+    const std::string base = "https://example.com/docs/guide/index.html";
+    checkEqual(resolveUrl(base, "intro.html"), "https://example.com/docs/guide/intro.html",
+               "sibling relative");
+    checkEqual(resolveUrl(base, "../api/list.html"), "https://example.com/docs/api/list.html",
+               "parent relative");
+    checkEqual(resolveUrl(base, "/top.html"), "https://example.com/top.html", "root relative");
+    checkEqual(resolveUrl(base, "//cdn.example.com/x.js"), "https://cdn.example.com/x.js",
+               "protocol relative");
+    checkEqual(resolveUrl(base, "https://other.com/y"), "https://other.com/y", "already absolute");
+    checkEqual(resolveUrl(base, "javascript:alert(1)"), "", "javascript: is not a link");
+    checkEqual(resolveUrl(base, "mailto:a@b.c"), "", "mailto: is not a link");
+    checkEqual(resolveUrl(base, "?q=1"), "https://example.com/docs/guide/?q=1", "query only");
+}
+
+void testHtmlToMarkdown() {
+    using dc::htmlToMarkdown;
+
+    const std::string page =
+        "<html><head><title>  Page &amp; Title </title>"
+        "<style>body{color:red}</style></head><body>"
+        "<nav><a href=\"/junk\">nav link</a></nav>"
+        "<h1>Heading</h1><p>Some <code>inline</code> prose.</p>"
+        "<ul><li>one</li><li>two</li></ul>"
+        "<pre>keep   spacing\n  indented</pre>"
+        "<p><a href=\"/next?a=1&amp;b=2\">next</a></p>"
+        "<img alt=\"a diagram\" src=\"x.png\">"
+        "<script>if (a < b) { document.write('hi'); }</script>"
+        "<footer>footer junk</footer></body></html>";
+
+    const dc::MarkdownResult result = htmlToMarkdown(page, "https://example.com/docs/", 100000);
+
+    checkEqual(result.title, "Page & Title", "title extracted, entity-decoded and trimmed");
+    check(result.markdown.find("# Heading") != std::string::npos, "h1 becomes a markdown heading");
+    check(result.markdown.find("`inline`") != std::string::npos, "inline code keeps backticks");
+    check(result.markdown.find("- one\n- two") != std::string::npos, "list items are tight");
+    check(result.markdown.find("```") != std::string::npos, "pre becomes a fenced block");
+    check(result.markdown.find("keep   spacing") != std::string::npos,
+          "whitespace inside pre is preserved");
+    check(result.markdown.find("[next](https://example.com/next?a=1&b=2)") != std::string::npos,
+          "link is absolutised and its href entity-decoded");
+    check(result.markdown.find("![a diagram]") != std::string::npos, "image alt text is kept");
+
+    // Chrome and non-prose must not reach the model.
+    check(result.markdown.find("nav link") == std::string::npos, "nav is dropped");
+    check(result.markdown.find("footer junk") == std::string::npos, "footer is dropped");
+    check(result.markdown.find("color:red") == std::string::npos, "style contents are dropped");
+    check(result.markdown.find("document.write") == std::string::npos, "script contents are dropped");
+    // `a < b` inside a script must not be mistaken for a tag and leak the rest.
+    check(result.markdown.find("hi') }") == std::string::npos, "script raw text is skipped whole");
+
+    check(result.markdown.find("\n\n\n") == std::string::npos, "no runs of blank lines");
+
+    const dc::MarkdownResult capped = htmlToMarkdown("<p>abcdefghij</p>", "", 4);
+    check(capped.truncated, "maxChars reports truncation");
+    check(capped.markdown.size() == 4, "maxChars cuts the output");
+
+    // A page that ends mid-anchor must not leave dangling markdown.
+    const dc::MarkdownResult broken = htmlToMarkdown("<p><a href=\"/x\">unclosed", "https://e.com", 1000);
+    check(broken.markdown.find("](https://e.com/x)") != std::string::npos,
+          "unterminated anchor is closed");
+}
+
+void testFetchUrlParsing() {
+    using dc::parseFetchUrl;
+
+    const dc::ParsedFetchUrl ok = parseFetchUrl("  https://Example.com:8443/a/b?c=1  ");
+    check(ok.valid, "https URL accepted");
+    checkEqual(ok.host, "example.com:8443", "host and port lowercased");
+
+    check(!parseFetchUrl("file:///C:/secrets.txt").valid, "file: refused");
+    check(!parseFetchUrl("data:text/html,<b>x</b>").valid, "data: refused");
+    check(!parseFetchUrl("/just/a/path").valid, "relative path refused");
+    check(!parseFetchUrl("").valid, "empty refused");
+    checkEqual(parseFetchUrl("http://user:pw@internal.host/x").host, "internal.host",
+               "credentials stripped so the checked host is the real destination");
+
+    using dc::isHtmlContentType;
+    using dc::isJsonContentType;
+    using dc::isTextualContentType;
+    check(isHtmlContentType("text/html; charset=utf-8"), "html with charset parameter");
+    check(isJsonContentType("application/vnd.api+json"), "+json suffix");
+    check(isTextualContentType(""), "missing content type counts as textual (dev servers)");
+    check(isTextualContentType("text/plain"), "text/* is textual");
+    check(!isTextualContentType("image/png"), "images are refused");
+    check(!isTextualContentType("application/octet-stream"), "binary is refused");
+}
+
+void testWebPermissions() {
+    using dc::PermissionBroker;
+
+    check(PermissionBroker::matchesHostPattern("example.com", "example.com"), "exact host");
+    check(!PermissionBroker::matchesHostPattern("evil.com", "example.com"), "different host");
+    check(PermissionBroker::matchesHostPattern("api.example.com", "*.example.com"), "subdomain");
+    check(!PermissionBroker::matchesHostPattern("example.com", "*.example.com"),
+          "wildcard does not match the apex");
+    check(PermissionBroker::matchesHostPattern("localhost:3000", "localhost"),
+          "a portless pattern matches any port");
+    check(!PermissionBroker::matchesHostPattern("localhost:5173", "localhost:3000"),
+          "naming a port excludes the others");
+    check(PermissionBroker::matchesHostPattern("[::1]:8080", "[::1]"),
+          "IPv6 literal is not split at its colons");
+    check(PermissionBroker::matchesHostPattern("anything.dev", "**"), "** matches any host");
+
+    checkEqual(PermissionBroker::classifyWeb("example.com"), "ask", "an unknown host prompts");
+    checkEqual(PermissionBroker::classifyWeb("169.254.169.254"), "deny", "AWS metadata denied");
+    checkEqual(PermissionBroker::classifyWeb("metadata.google.internal"), "deny", "GCP metadata denied");
+    checkEqual(PermissionBroker::classifyWeb("169.254.169.254:80"), "deny",
+               "metadata denial is not evaded by naming the port");
+
+    // The property that matters: the metadata deny is not a prompt the user can
+    // wave through, and auto-approve does not reach it.
+    dc::PermissionBroker broker;
+    const dc::PermissionOutcome denied =
+        broker.checkWeb("http://169.254.169.254/latest/meta-data/", "169.254.169.254", true);
+    check(!denied.allowed, "metadata endpoint refused even with auto-approve on");
+
+    const dc::PermissionOutcome allowed = broker.checkWeb("https://example.com/x", "example.com", true);
+    check(allowed.allowed, "an ordinary host passes when auto-approve is on");
+}
+
 void testTextHelpers() {
     const std::vector<std::string> crlf = dc::splitLines("a\r\nb\nc");
     check(crlf.size() == 3 && crlf[0] == "a" && crlf[1] == "b", "CRLF and LF split the same way");
@@ -216,6 +356,11 @@ int main() {
     testReadGuards();
     testSseDecoder();
     testPermissionBroker();
+    testEntities();
+    testResolveUrl();
+    testHtmlToMarkdown();
+    testFetchUrlParsing();
+    testWebPermissions();
     testStreamReducer();
     testTextHelpers();
 
