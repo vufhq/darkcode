@@ -1,0 +1,5 @@
+build/
+out/
+vendor/imgui/
+vendor/json/
+imgui.ini
