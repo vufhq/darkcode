@@ -58,8 +58,9 @@ editable in **Settings**. Desktop-only preferences live in
   Nothing outside it can be read or written — symlinks included, since paths are
   canonicalised before the containment check. It defaults to the working
   directory, or your home folder when the app is launched from Explorer.
-- **PLAN / BUILD** toggles next to the composer. PLAN exposes only the read-only
-  tools; BUILD adds `writeFile`, `editFile` and `bash`.
+- **PLAN / BUILD** and the model picker sit in the top bar, since both belong to
+  the session rather than to one message. PLAN exposes only the read-only tools;
+  BUILD adds `writeFile`, `editFile` and `bash`.
 - **Enter** sends, **Ctrl+Enter** inserts a newline.
 - **Stop** aborts a turn: it cancels the stream, releases any tool waiting on a
   permission prompt, and reports the remaining calls back to the model as errors.
@@ -111,6 +112,25 @@ telling the model the content is untrusted data rather than instructions.
 
 `webSearch` needs nothing here — it is the one tool that executes server-side.
 
+## Design
+
+One palette, a 4pt spacing scale and a five-step type ramp live in
+`theme.h`; nothing in `ui.cpp` picks a colour or a size of its own. Three
+conventions do most of the work:
+
+- **Surfaces separate by value and a hairline**, not by borders on everything,
+  so the window reads as one object rather than a stack of boxes.
+- **The accent is spent sparingly** — primary action, selection, focus. A colour
+  used everywhere stops meaning anything.
+- **The transcript is capped at a readable measure and centred.** Prose set to
+  the full width of a maximised window is the loudest tell that a UI was never
+  designed to be read.
+
+Fonts are Segoe UI, Segoe UI Semibold and Cascadia Mono, each falling back to
+the next best thing. The glyph range is extended past Latin-1 to cover the
+punctuation a language model actually writes — em dashes, curly quotes,
+ellipses — which would otherwise render as hollow boxes.
+
 ## How a turn works
 
 Tool dispatch is client-side — the server only declares schemas — so the desktop
@@ -131,6 +151,7 @@ app runs the same loop the CLI does:
 | `src/main.cpp` | Win32 window, D3D11 device, frame loop |
 | `src/app.{h,cpp}` | State and the turn loop; the threading rules are documented at the top of the header |
 | `src/ui.cpp` | All rendering |
+| `src/theme.{h,cpp}` | Palette, spacing scale, type ramp, ImGui style |
 | `src/chat.{h,cpp}` | UIMessage model, SSE decoder, stream reducer |
 | `src/tools.{h,cpp}` | Local tool execution, path jail, `.gitignore` walker, bash spawning |
 | `src/web.{h,cpp}` | `webFetch`: URL validation, hop-by-hop redirects, content-type routing |
