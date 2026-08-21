@@ -110,11 +110,12 @@ void hairline(float inset = 0.0f) {
 // Controls
 // ---------------------------------------------------------------------------
 
+/// Primary is the inversion, not a colour: white ground, black label.
 bool primaryButton(const char* label, const ImVec2& size = ImVec2(0, 0)) {
     const ColorScope colors(ImGuiCol_Button, kAccent, ImGuiCol_ButtonHovered, kAccentHover,
-                            ImGuiCol_ButtonActive, mix(kAccent, kCanvas, 0.15f));
-    const ColorScope textColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
-    ImGui::PushStyleColor(ImGuiCol_Border, withAlpha(kAccentHover, 0.6f));
+                            ImGuiCol_ButtonActive, mix(kAccent, kCanvas, 0.12f));
+    const ColorScope textColor(ImGuiCol_Text, kOnAccent);
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
     const bool pressed = ImGui::Button(label, size);
     ImGui::PopStyleColor();
     return pressed;
@@ -254,22 +255,30 @@ ImVec4 toolStateColor(ToolState state) {
     return kTextFaint;
 }
 
-/// Three dots that fade in sequence. Cheap, and it makes a long pause read as
-/// "working" rather than "hung".
-void workingIndicator() {
-    const double now = ImGui::GetTime();
+/// The site's indeterminate track: a 2px rule with a spectrum segment sweeping
+/// across it. This is the one place besides the mark where colour appears, and
+/// it makes a long pause read as "working" rather than "hung".
+void workingTrack(float width) {
+    constexpr float kHeight = 2.0f;
+    constexpr float kPeriod = 2.2f;   // matches the site's np-sweep
+    constexpr float kSegment = 0.38f; // fraction of the track that travels
+
     const ImVec2 origin = ImGui::GetCursorScreenPos();
-    const float radius = ImGui::GetFontSize() * 0.16f;
-    const float step = radius * 3.2f;
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    for (int i = 0; i < 3; ++i) {
-        const float phase = static_cast<float>(now * 3.0 - i * 0.5);
-        const float alpha = 0.35f + 0.45f * (0.5f + 0.5f * std::sin(phase));
-        draw->AddCircleFilled(ImVec2(origin.x + radius + step * i, origin.y + ImGui::GetTextLineHeight() * 0.5f),
-                              radius, ImGui::GetColorU32(withAlpha(kAccent, alpha)));
-    }
-    ImGui::Dummy(ImVec2(step * 3.0f, ImGui::GetTextLineHeight()));
-    ImGui::SameLine(0.0f, kSpace2);
+
+    const ImVec2 trackMax(origin.x + width, origin.y + kHeight);
+    draw->AddRectFilled(origin, trackMax, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.12f)), kRadiusFull);
+
+    const float segment = width * kSegment;
+    const float phase = static_cast<float>(std::fmod(ImGui::GetTime(), kPeriod)) / kPeriod;
+    // translate(-100%) → translate(266%) of the segment's own width
+    const float x = origin.x + (-1.0f + phase * 3.66f) * segment;
+
+    draw->PushClipRect(origin, trackMax, true);
+    drawSpectrum(draw, ImVec2(x, origin.y), ImVec2(x + segment, trackMax.y));
+    draw->PopClipRect();
+
+    ImGui::Dummy(ImVec2(width, kHeight));
 }
 
 const char* const kSuggestions[] = {
@@ -330,24 +339,17 @@ void App::drawSidebar(float width) {
     }
 
     // ---- wordmark --------------------------------------------------------
+    // The word, then a short spectrum rule beneath it. No logo tile: the site
+    // has no mark either, and the only colour it spends is on a 2px bar.
     ImGui::SetCursorPos(ImVec2(kSpace4, kSpace4));
     {
-        // A small accent tile in place of a logo: enough of a mark to anchor
-        // the corner without pretending to be artwork.
-        const ImVec2 origin = ImGui::GetCursorScreenPos();
-        const float side = ImGui::GetFontSize() * 1.15f;
-        ImDrawList* draw = ImGui::GetWindowDrawList();
-        draw->AddRectFilled(origin, ImVec2(origin.x + side, origin.y + side),
-                            ImGui::GetColorU32(kAccent), kRadiusSm);
-        draw->AddRectFilled(ImVec2(origin.x + side * 0.30f, origin.y + side * 0.42f),
-                            ImVec2(origin.x + side * 0.70f, origin.y + side * 0.58f),
-                            ImGui::GetColorU32(ImVec4(1, 1, 1, 0.95f)), 1.0f);
-        ImGui::Dummy(ImVec2(side, side));
-        ImGui::SameLine(0.0f, kSpace2 + 2.0f);
-
         const FontScope font(fonts_.display);
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 1.0f);
         text("DarkCode", kText);
+    }
+    {
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        drawSpectrum(ImGui::GetWindowDrawList(), ImVec2(origin.x + kSpace4, origin.y + kSpace1),
+                     ImVec2(origin.x + kSpace4 + 30.0f, origin.y + kSpace1 + 2.0f));
     }
 
     ImGui::SetCursorPosX(kSpace4);
@@ -356,7 +358,10 @@ void App::drawSidebar(float width) {
     // ---- new session -----------------------------------------------------
     ImGui::SetCursorPosX(kSpace4);
     ImGui::BeginDisabled(streaming);
-    if (primaryButton("New session", ImVec2(width - kSpace4 * 2.0f, 34.0f))) startNewSession();
+    // Secondary, not inverted: there is exactly one white element on screen and
+    // it is Send. Two of them would compete, and the language spends contrast
+    // as sparingly as it spends colour.
+    if (secondaryButton("New session", ImVec2(width - kSpace4 * 2.0f, 34.0f))) startNewSession();
     ImGui::EndDisabled();
 
     space(kSpace4);
@@ -414,9 +419,9 @@ void App::drawSidebar(float width) {
             draw->AddRectFilled(origin, corner, ImGui::GetColorU32(kSurfaceHover), kRadiusMd);
             draw->AddRectFilled(ImVec2(origin.x, origin.y + kSpace1),
                                 ImVec2(origin.x + 2.0f, corner.y - kSpace1),
-                                ImGui::GetColorU32(kAccent), 1.0f);
+                                ImGui::GetColorU32(kText), kRadiusFull);
         } else if (hovered) {
-            draw->AddRectFilled(origin, corner, ImGui::GetColorU32(withAlpha(kSurface, 0.75f)), kRadiusMd);
+            draw->AddRectFilled(origin, corner, ImGui::GetColorU32(kSurfaceFaint), kRadiusMd);
         }
 
         const float textX = origin.x + kSpace3;
@@ -608,9 +613,13 @@ void App::drawTranscript() {
 
     if (streaming && !status.empty()) {
         ImGui::SetCursorPosX(inset);
-        workingIndicator();
-        const FontScope font(fonts_.caption);
-        text(status, kTextMuted);
+        {
+            const FontScope font(fonts_.caption);
+            text(status, kTextMuted);
+        }
+        space(kSpace1);
+        ImGui::SetCursorPosX(inset);
+        workingTrack(column);
         space(kSpace4);
     }
 
@@ -722,7 +731,7 @@ void App::drawToolCall(const ToolCall& tool, float column) {
     space(kSpace2);
     ImGui::PushID(tool.toolCallId.c_str());
 
-    const ColorScope background(ImGuiCol_ChildBg, expanded ? kSurface : withAlpha(kSurface, 0.55f));
+    const ColorScope background(ImGuiCol_ChildBg, expanded ? kSurface : kSurfaceFaint);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kSpace3, kSpace2 + 1.0f));
     ImGui::BeginChild("##tool", ImVec2(column, 0),
                       ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding |
@@ -998,7 +1007,7 @@ void App::drawComposer() {
     if (inputActive) {
         ImGui::GetWindowDrawList()->AddRect(cardOrigin,
                                             ImVec2(cardOrigin.x + column, cardOrigin.y + cardHeight),
-                                            ImGui::GetColorU32(withAlpha(kAccent, 0.55f)), kRadiusLg,
+                                            ImGui::GetColorU32(kFocusRing), kRadiusMd,
                                             0, 1.0f);
     }
 }
@@ -1053,23 +1062,24 @@ void App::drawEmptyState() {
 
     ImGui::SetCursorPosX(inset);
     {
-        const FontScope font(fonts_.display);
+        // Weight 300 at size: the language never shouts at scale.
+        const FontScope font(fonts_.light);
         text("What are we building?", kText);
     }
 
-    space(kSpace2);
+    space(kSpace3);
     ImGui::SetCursorPosX(inset);
     ImGui::PushTextWrapPos(inset + column);
     wrapped("Tools run on this machine against " + settings_.projectDir +
                 ". PLAN keeps them read-only; BUILD allows writes and shell commands.",
-            kTextMuted);
+            kTextSoft);
     ImGui::PopTextWrapPos();
 
     space(kSpace5);
     for (const char* suggestion : kSuggestions) {
         ImGui::SetCursorPosX(inset);
         ImGui::PushID(suggestion);
-        const ColorScope colors(ImGuiCol_Button, withAlpha(kSurface, 0.7f), ImGuiCol_ButtonHovered,
+        const ColorScope colors(ImGuiCol_Button, kSurfaceFaint, ImGuiCol_ButtonHovered,
                                 kSurfaceHover, ImGuiCol_Text, kTextMuted);
         if (ImGui::Button(suggestion, ImVec2(column, 32.0f))) {
             std::snprintf(composerBuffer_.data(), composerBuffer_.size(), "%s", suggestion);
@@ -1088,7 +1098,7 @@ void App::drawSignedOutState() {
     space(ImGui::GetContentRegionAvail().y * 0.28f);
     ImGui::SetCursorPosX(inset);
     {
-        const FontScope font(fonts_.display);
+        const FontScope font(fonts_.light);
         text("Sign in to DarkCode", kText);
     }
 
@@ -1097,7 +1107,7 @@ void App::drawSignedOutState() {
     ImGui::PushTextWrapPos(inset + column);
     wrapped("The desktop app reads the same credentials as the CLI. In a terminal, run darkcode "
             "and use /login, then come back here.",
-            kTextMuted);
+            kTextSoft);
     ImGui::PopTextWrapPos();
 
     space(kSpace5);
