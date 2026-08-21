@@ -4,8 +4,14 @@ A native Windows front-end for the DarkCode agent, in C++20 with Dear ImGui over
 Win32 + Direct3D 11. Same API, same on-disk credentials, same client-side tool
 model as the CLI — a window instead of a terminal.
 
-Self-contained: one 1.2 MB `.exe`, static CRT, no runtime to install. HTTP is
-WinHTTP, JSON is a vendored nlohmann/json header, the UI is vendored ImGui.
+Self-contained: one `.exe`, static CRT, no runtime to install. HTTP is WinHTTP,
+JSON is a vendored nlohmann/json header, the UI is vendored ImGui. The window is
+frameless — it draws its own title bar — and Inter / JetBrains Mono ship beside
+the binary in `assets/fonts/` (SIL OFL), falling back to system faces if that
+folder is absent.
+
+The design system and its rationale live in [DESIGN.md](DESIGN.md); what the app
+is for lives in [PRODUCT.md](PRODUCT.md).
 
 ## Build
 
@@ -162,6 +168,8 @@ app runs the same loop the CLI does:
 | `src/app.{h,cpp}` | State and the turn loop; the threading rules are documented at the top of the header |
 | `src/ui.cpp` | All rendering |
 | `src/theme.{h,cpp}` | Palette, spacing scale, type ramp, ImGui style |
+| `src/window.{h,cpp}` | Frameless chrome: hit-testing, maximise insets, reduced-motion |
+| `src/anim.h` | Per-widget easing for an immediate-mode UI |
 | `src/chat.{h,cpp}` | UIMessage model, SSE decoder, stream reducer |
 | `src/tools.{h,cpp}` | Local tool execution, path jail, `.gitignore` walker, bash spawning |
 | `src/web.{h,cpp}` | `webFetch`: URL validation, hop-by-hop redirects, content-type routing |

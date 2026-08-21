@@ -36,6 +36,7 @@ add_executable(darkcode-desktop WIN32
   src/permissions.cpp
   src/html.cpp
   src/web.cpp
+  src/window.cpp
   ${IMGUI_DIR}/imgui.cpp
   ${IMGUI_DIR}/imgui_draw.cpp
   ${IMGUI_DIR}/imgui_tables.cpp
@@ -99,6 +100,15 @@ endif()
 
 enable_testing()
 add_test(NAME logic COMMAND darkcode-desktop-tests)
+
+# The bundled fonts are optional at runtime — the app falls back to system
+# faces — but copying them beside the executable is what makes it look the same
+# on every machine.
+add_custom_command(TARGET darkcode-desktop POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+          "$<TARGET_FILE_DIR:darkcode-desktop>/assets"
+  COMMENT "Copying assets beside the executable")
 
 set_target_properties(darkcode-desktop PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"

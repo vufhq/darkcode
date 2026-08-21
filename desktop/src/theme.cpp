@@ -4,8 +4,26 @@
 
 #include <string>
 
+#include "util.h"
+
 namespace dc::theme {
 namespace {
+
+/// Fonts shipped with the app, in `assets/fonts` beside the executable. Tried
+/// before the system copies so the app looks the same on every machine, and
+/// optional so a bare .exe still runs.
+std::string bundledFontPath(const char* fileName) {
+    wchar_t exePath[MAX_PATH]{};
+    if (::GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0) return {};
+
+    std::wstring path(exePath);
+    const size_t slash = path.find_last_of(L'\\');
+    if (slash == std::wstring::npos) return {};
+    path.resize(slash + 1);
+    path += L"assets\\fonts\\";
+
+    return toUtf8(path) + fileName;
+}
 
 std::string systemFontPath(const char* fileName) {
     char directory[MAX_PATH]{};
@@ -25,7 +43,8 @@ std::string userFontPath(const char* fileName) {
 }
 
 ImFont* tryLoad(ImGuiIO& io, const char* fileName, float sizePixels, const ImFontConfig* config) {
-    for (const std::string& path : {systemFontPath(fileName), userFontPath(fileName)}) {
+    for (const std::string& path : {bundledFontPath(fileName), systemFontPath(fileName),
+                                    userFontPath(fileName)}) {
         if (path.empty()) continue;
         if (::GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
         return io.Fonts->AddFontFromFileTTF(path.c_str(), sizePixels, config);
