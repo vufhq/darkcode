@@ -24,6 +24,7 @@
 #include "permissions.h"
 #include "theme.h"
 #include "tools.h"
+#include "window.h"
 
 namespace dc {
 
@@ -62,6 +63,7 @@ private:
     void toast(const std::string& text, bool isError = false);
 
     // ---- drawing ---------------------------------------------------------
+    void drawTitleBar();
     void drawSidebar(float width);
     void drawMainColumn();
     void drawTopBar();

@@ -14,9 +14,11 @@
 #include <cmath>
 #include <cstdio>
 
+#include "anim.h"
 #include "imgui.h"
 #include "models.h"
 #include "util.h"
+#include "window.h"
 
 namespace dc {
 namespace {
@@ -110,11 +112,12 @@ void hairline(float inset = 0.0f) {
 // Controls
 // ---------------------------------------------------------------------------
 
+/// Primary is the inversion, not a colour: white ground, black label.
 bool primaryButton(const char* label, const ImVec2& size = ImVec2(0, 0)) {
     const ColorScope colors(ImGuiCol_Button, kAccent, ImGuiCol_ButtonHovered, kAccentHover,
-                            ImGuiCol_ButtonActive, mix(kAccent, kCanvas, 0.15f));
-    const ColorScope textColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
-    ImGui::PushStyleColor(ImGuiCol_Border, withAlpha(kAccentHover, 0.6f));
+                            ImGuiCol_ButtonActive, mix(kAccent, kCanvas, 0.12f));
+    const ColorScope textColor(ImGuiCol_Text, kOnAccent);
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
     const bool pressed = ImGui::Button(label, size);
     ImGui::PopStyleColor();
     return pressed;
@@ -254,22 +257,94 @@ ImVec4 toolStateColor(ToolState state) {
     return kTextFaint;
 }
 
-/// Three dots that fade in sequence. Cheap, and it makes a long pause read as
-/// "working" rather than "hung".
-void workingIndicator() {
-    const double now = ImGui::GetTime();
+/// The site's indeterminate track: a 2px rule with a spectrum segment sweeping
+/// across it. This is the one place besides the mark where colour appears, and
+/// it makes a long pause read as "working" rather than "hung".
+void workingTrack(float width) {
+    constexpr float kHeight = 2.0f;
+    constexpr float kPeriod = 2.2f;   // matches the site's np-sweep
+    constexpr float kSegment = 0.38f; // fraction of the track that travels
+
     const ImVec2 origin = ImGui::GetCursorScreenPos();
-    const float radius = ImGui::GetFontSize() * 0.16f;
-    const float step = radius * 3.2f;
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    for (int i = 0; i < 3; ++i) {
-        const float phase = static_cast<float>(now * 3.0 - i * 0.5);
-        const float alpha = 0.35f + 0.45f * (0.5f + 0.5f * std::sin(phase));
-        draw->AddCircleFilled(ImVec2(origin.x + radius + step * i, origin.y + ImGui::GetTextLineHeight() * 0.5f),
-                              radius, ImGui::GetColorU32(withAlpha(kAccent, alpha)));
+
+    const ImVec2 trackMax(origin.x + width, origin.y + kHeight);
+    draw->AddRectFilled(origin, trackMax, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.12f)), kRadiusFull);
+
+    const float segment = width * kSegment;
+    const float phase = static_cast<float>(std::fmod(ImGui::GetTime(), kPeriod)) / kPeriod;
+    // translate(-100%) → translate(266%) of the segment's own width
+    const float x = origin.x + (-1.0f + phase * 3.66f) * segment;
+
+    draw->PushClipRect(origin, trackMax, true);
+    drawSpectrum(draw, ImVec2(x, origin.y), ImVec2(x + segment, trackMax.y));
+    draw->PopClipRect();
+
+    ImGui::Dummy(ImVec2(width, kHeight));
+}
+
+// ---------------------------------------------------------------------------
+// Window controls
+// ---------------------------------------------------------------------------
+
+inline constexpr float kTitleBarHeight = 38.0f;
+inline constexpr float kControlWidth = 46.0f;
+
+enum class WindowControl { Minimize, Maximize, Close };
+
+/// Minimise / maximise / close, drawn to the Windows proportions users already
+/// know — same 46px column, same glyph weight, same close-goes-red — because a
+/// reinvented window control is the fastest way to make an app feel wrong.
+bool windowControl(const char* id, WindowControl kind, bool maximized) {
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 size(kControlWidth, kTitleBarHeight);
+
+    ImGui::PushID(id);
+    const bool pressed = ImGui::InvisibleButton("##ctl", size);
+    const bool hovered = ImGui::IsItemHovered();
+    const bool held = ImGui::IsItemActive();
+    ImGui::PopID();
+
+    const float on = anim::toward(ImGui::GetID(id), hovered ? 1.0f : 0.0f, anim::kFast);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 corner(origin.x + size.x, origin.y + size.y);
+
+    if (on > 0.001f) {
+        const ImVec4 base = (kind == WindowControl::Close) ? ImVec4(0.906f, 0.184f, 0.204f, 1.0f)
+                                                          : ImVec4(1, 1, 1, 1);
+        const float alpha = (kind == WindowControl::Close ? 1.0f : 0.09f) * on * (held ? 0.75f : 1.0f);
+        draw->AddRectFilled(origin, corner, ImGui::GetColorU32(withAlpha(base, alpha)));
     }
-    ImGui::Dummy(ImVec2(step * 3.0f, ImGui::GetTextLineHeight()));
-    ImGui::SameLine(0.0f, kSpace2);
+
+    // Glyphs are drawn rather than typed: the segoe-fluent icon font is not on
+    // every machine, and three lines cost nothing.
+    const ImVec2 c(origin.x + size.x * 0.5f, origin.y + size.y * 0.5f);
+    const float r = 5.0f;
+    const ImU32 ink = ImGui::GetColorU32(kText);
+
+    switch (kind) {
+        case WindowControl::Minimize:
+            draw->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), ink, 1.0f);
+            break;
+        case WindowControl::Maximize:
+            if (maximized) {
+                draw->AddRect(ImVec2(c.x - r, c.y - r + 2.0f), ImVec2(c.x + r - 2.0f, c.y + r), ink,
+                              0.0f, 0, 1.0f);
+                draw->AddLine(ImVec2(c.x - r + 2.0f, c.y - r + 2.0f), ImVec2(c.x - r + 2.0f, c.y - r),
+                              ink, 1.0f);
+                draw->AddLine(ImVec2(c.x - r + 2.0f, c.y - r), ImVec2(c.x + r, c.y - r), ink, 1.0f);
+                draw->AddLine(ImVec2(c.x + r, c.y - r), ImVec2(c.x + r, c.y + r - 2.0f), ink, 1.0f);
+            } else {
+                draw->AddRect(ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), ink, 0.0f, 0, 1.0f);
+            }
+            break;
+        case WindowControl::Close:
+            draw->AddLine(ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), ink, 1.1f);
+            draw->AddLine(ImVec2(c.x + r, c.y - r), ImVec2(c.x - r, c.y + r), ink, 1.1f);
+            break;
+    }
+
+    return pressed;
 }
 
 const char* const kSuggestions[] = {
@@ -298,6 +373,8 @@ void App::render() {
                      ImGuiWindowFlags_NoNavFocus);
     ImGui::PopStyleVar();
 
+    drawTitleBar();
+
     drawSidebar(kSidebarWidth);
     ImGui::SameLine(0.0f, 0.0f);
 
@@ -315,6 +392,54 @@ void App::render() {
 }
 
 // ---------------------------------------------------------------------------
+// Title bar
+// ---------------------------------------------------------------------------
+
+void App::drawTitleBar() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float width = viewport->WorkSize.x;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+
+    // The mark lives here rather than in the sidebar: it is the one thing that
+    // belongs to the window rather than to the session.
+    ImGui::SetCursorPos(ImVec2(kSpace4, (kTitleBarHeight - ImGui::GetTextLineHeight()) * 0.5f));
+    {
+        const FontScope font(fonts_.display);
+        text("DarkCode", kText);
+    }
+    {
+        const ImVec2 markOrigin = ImGui::GetItemRectMin();
+        const float y = ImGui::GetItemRectMax().y + 1.0f;
+        drawSpectrum(draw, ImVec2(markOrigin.x, y), ImVec2(markOrigin.x + 30.0f, y + 2.0f));
+    }
+
+    // Controls, right to left.
+    const float controlsWidth = kControlWidth * 3.0f;
+    HWND hwnd = static_cast<HWND>(viewport->PlatformHandleRaw ? viewport->PlatformHandleRaw
+                                                              : viewport->PlatformHandle);
+    const bool maximized = hwnd && window::isMaximized(hwnd);
+
+    ImGui::SetCursorPos(ImVec2(width - controlsWidth, 0.0f));
+    if (windowControl("min", WindowControl::Minimize, maximized) && hwnd) window::minimize(hwnd);
+    ImGui::SameLine(0.0f, 0.0f);
+    if (windowControl("max", WindowControl::Maximize, maximized) && hwnd) window::toggleMaximize(hwnd);
+    ImGui::SameLine(0.0f, 0.0f);
+    if (windowControl("close", WindowControl::Close, maximized) && hwnd) window::close(hwnd);
+
+    // Hand the drag strip to Windows, minus the buttons, in physical pixels.
+    const float dpiScale = ImGui::GetIO().DisplayFramebufferScale.x > 0.0f
+                               ? ImGui::GetIO().DisplayFramebufferScale.x
+                               : 1.0f;
+    window::setTitleBar(kTitleBarHeight * dpiScale, controlsWidth * dpiScale);
+
+    draw->AddLine(ImVec2(origin.x, origin.y + kTitleBarHeight),
+                  ImVec2(origin.x + width, origin.y + kTitleBarHeight), ImGui::GetColorU32(kBorder));
+
+    ImGui::SetCursorPos(ImVec2(0.0f, kTitleBarHeight + 1.0f));
+}
+
+// ---------------------------------------------------------------------------
 // Sidebar
 // ---------------------------------------------------------------------------
 
@@ -329,34 +454,17 @@ void App::drawSidebar(float width) {
         streaming = streaming_;
     }
 
-    // ---- wordmark --------------------------------------------------------
+    // The mark now lives in the title bar, which is where a window's identity
+    // belongs; the sidebar starts straight into the session list.
     ImGui::SetCursorPos(ImVec2(kSpace4, kSpace4));
-    {
-        // A small accent tile in place of a logo: enough of a mark to anchor
-        // the corner without pretending to be artwork.
-        const ImVec2 origin = ImGui::GetCursorScreenPos();
-        const float side = ImGui::GetFontSize() * 1.15f;
-        ImDrawList* draw = ImGui::GetWindowDrawList();
-        draw->AddRectFilled(origin, ImVec2(origin.x + side, origin.y + side),
-                            ImGui::GetColorU32(kAccent), kRadiusSm);
-        draw->AddRectFilled(ImVec2(origin.x + side * 0.30f, origin.y + side * 0.42f),
-                            ImVec2(origin.x + side * 0.70f, origin.y + side * 0.58f),
-                            ImGui::GetColorU32(ImVec4(1, 1, 1, 0.95f)), 1.0f);
-        ImGui::Dummy(ImVec2(side, side));
-        ImGui::SameLine(0.0f, kSpace2 + 2.0f);
-
-        const FontScope font(fonts_.display);
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 1.0f);
-        text("DarkCode", kText);
-    }
-
-    ImGui::SetCursorPosX(kSpace4);
-    space(kSpace3);
 
     // ---- new session -----------------------------------------------------
     ImGui::SetCursorPosX(kSpace4);
     ImGui::BeginDisabled(streaming);
-    if (primaryButton("New session", ImVec2(width - kSpace4 * 2.0f, 34.0f))) startNewSession();
+    // Secondary, not inverted: there is exactly one white element on screen and
+    // it is Send. Two of them would compete, and the language spends contrast
+    // as sparingly as it spends colour.
+    if (secondaryButton("New session", ImVec2(width - kSpace4 * 2.0f, 34.0f))) startNewSession();
     ImGui::EndDisabled();
 
     space(kSpace4);
@@ -410,13 +518,26 @@ void App::drawSidebar(float width) {
 
         ImDrawList* draw = ImGui::GetWindowDrawList();
         const ImVec2 corner(origin.x + rowWidth, origin.y + rowHeight);
-        if (selected) {
-            draw->AddRectFilled(origin, corner, ImGui::GetColorU32(kSurfaceHover), kRadiusMd);
-            draw->AddRectFilled(ImVec2(origin.x, origin.y + kSpace1),
-                                ImVec2(origin.x + 2.0f, corner.y - kSpace1),
-                                ImGui::GetColorU32(kAccent), 1.0f);
-        } else if (hovered) {
-            draw->AddRectFilled(origin, corner, ImGui::GetColorU32(withAlpha(kSurface, 0.75f)), kRadiusMd);
+
+        // Two independent eases: the fill answers the pointer, the marker
+        // answers the selection. Cross-fading them as one made switching
+        // sessions look like the list was still deciding.
+        const ImGuiID rowId = ImGui::GetID("##row");
+        const float hover = anim::toward(rowId, hovered ? 1.0f : 0.0f, anim::kFast);
+        const float pick = anim::toward(rowId + 1u, selected ? 1.0f : 0.0f, anim::kBase);
+
+        const float fill = std::max(hover * kSurfaceFaint.w, pick * kSurfaceHover.w);
+        if (fill > 0.001f) {
+            draw->AddRectFilled(origin, corner,
+                                ImGui::GetColorU32(ImVec4(1, 1, 1, fill)), kRadiusMd);
+        }
+        if (pick > 0.001f) {
+            // The marker grows from the centre, so selection reads as
+            // something arriving rather than something blinking on.
+            const float half = (rowHeight * 0.5f - kSpace1) * pick;
+            const float mid = origin.y + rowHeight * 0.5f;
+            draw->AddRectFilled(ImVec2(origin.x, mid - half), ImVec2(origin.x + 2.0f, mid + half),
+                                ImGui::GetColorU32(withAlpha(kText, pick)), kRadiusFull);
         }
 
         const float textX = origin.x + kSpace3;
@@ -608,9 +729,13 @@ void App::drawTranscript() {
 
     if (streaming && !status.empty()) {
         ImGui::SetCursorPosX(inset);
-        workingIndicator();
-        const FontScope font(fonts_.caption);
-        text(status, kTextMuted);
+        {
+            const FontScope font(fonts_.caption);
+            text(status, kTextMuted);
+        }
+        space(kSpace1);
+        ImGui::SetCursorPosX(inset);
+        workingTrack(column);
         space(kSpace4);
     }
 
@@ -722,7 +847,7 @@ void App::drawToolCall(const ToolCall& tool, float column) {
     space(kSpace2);
     ImGui::PushID(tool.toolCallId.c_str());
 
-    const ColorScope background(ImGuiCol_ChildBg, expanded ? kSurface : withAlpha(kSurface, 0.55f));
+    const ColorScope background(ImGuiCol_ChildBg, expanded ? kSurface : kSurfaceFaint);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kSpace3, kSpace2 + 1.0f));
     ImGui::BeginChild("##tool", ImVec2(column, 0),
                       ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding |
@@ -994,12 +1119,15 @@ void App::drawComposer() {
     ImGui::EndChild();
     ImGui::PopStyleVar();
 
-    // Focus ring around the whole card.
-    if (inputActive) {
+    // Focus ring around the whole card, eased so tabbing into the composer
+    // reads as the field waking up rather than a border snapping on.
+    const float focus = anim::toward(ImGui::GetID("##composerFocus"), inputActive ? 1.0f : 0.0f,
+                                     anim::kBase);
+    if (focus > 0.001f) {
         ImGui::GetWindowDrawList()->AddRect(cardOrigin,
                                             ImVec2(cardOrigin.x + column, cardOrigin.y + cardHeight),
-                                            ImGui::GetColorU32(withAlpha(kAccent, 0.55f)), kRadiusLg,
-                                            0, 1.0f);
+                                            ImGui::GetColorU32(withAlpha(kFocusRing, kFocusRing.w * focus)),
+                                            kRadiusMd, 0, 1.0f);
     }
 }
 
@@ -1053,23 +1181,24 @@ void App::drawEmptyState() {
 
     ImGui::SetCursorPosX(inset);
     {
-        const FontScope font(fonts_.display);
+        // Weight 300 at size: the language never shouts at scale.
+        const FontScope font(fonts_.light);
         text("What are we building?", kText);
     }
 
-    space(kSpace2);
+    space(kSpace3);
     ImGui::SetCursorPosX(inset);
     ImGui::PushTextWrapPos(inset + column);
     wrapped("Tools run on this machine against " + settings_.projectDir +
                 ". PLAN keeps them read-only; BUILD allows writes and shell commands.",
-            kTextMuted);
+            kTextSoft);
     ImGui::PopTextWrapPos();
 
     space(kSpace5);
     for (const char* suggestion : kSuggestions) {
         ImGui::SetCursorPosX(inset);
         ImGui::PushID(suggestion);
-        const ColorScope colors(ImGuiCol_Button, withAlpha(kSurface, 0.7f), ImGuiCol_ButtonHovered,
+        const ColorScope colors(ImGuiCol_Button, kSurfaceFaint, ImGuiCol_ButtonHovered,
                                 kSurfaceHover, ImGuiCol_Text, kTextMuted);
         if (ImGui::Button(suggestion, ImVec2(column, 32.0f))) {
             std::snprintf(composerBuffer_.data(), composerBuffer_.size(), "%s", suggestion);
@@ -1088,7 +1217,7 @@ void App::drawSignedOutState() {
     space(ImGui::GetContentRegionAvail().y * 0.28f);
     ImGui::SetCursorPosX(inset);
     {
-        const FontScope font(fonts_.display);
+        const FontScope font(fonts_.light);
         text("Sign in to DarkCode", kText);
     }
 
@@ -1097,7 +1226,7 @@ void App::drawSignedOutState() {
     ImGui::PushTextWrapPos(inset + column);
     wrapped("The desktop app reads the same credentials as the CLI. In a terminal, run darkcode "
             "and use /login, then come back here.",
-            kTextMuted);
+            kTextSoft);
     ImGui::PopTextWrapPos();
 
     space(kSpace5);

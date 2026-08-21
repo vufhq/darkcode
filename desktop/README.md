@@ -4,8 +4,14 @@ A native Windows front-end for the DarkCode agent, in C++20 with Dear ImGui over
 Win32 + Direct3D 11. Same API, same on-disk credentials, same client-side tool
 model as the CLI — a window instead of a terminal.
 
-Self-contained: one 1.2 MB `.exe`, static CRT, no runtime to install. HTTP is
-WinHTTP, JSON is a vendored nlohmann/json header, the UI is vendored ImGui.
+Self-contained: one `.exe`, static CRT, no runtime to install. HTTP is WinHTTP,
+JSON is a vendored nlohmann/json header, the UI is vendored ImGui. The window is
+frameless — it draws its own title bar — and Inter / JetBrains Mono ship beside
+the binary in `assets/fonts/` (SIL OFL), falling back to system faces if that
+folder is absent.
+
+The design system and its rationale live in [DESIGN.md](DESIGN.md); what the app
+is for lives in [PRODUCT.md](PRODUCT.md).
 
 ## Build
 
@@ -114,20 +120,30 @@ telling the model the content is untrusted data rather than instructions.
 
 ## Design
 
-One palette, a 4pt spacing scale and a five-step type ramp live in
-`theme.h`; nothing in `ui.cpp` picks a colour or a size of its own. Three
-conventions do most of the work:
+The interface follows the design language of [vufh.dev](https://www.vufh.dev/).
+Its tokens live in `theme.h`; nothing in `ui.cpp` picks a colour or a size of
+its own. Four ideas carry it:
 
-- **Surfaces separate by value and a hairline**, not by borders on everything,
-  so the window reads as one object rather than a stack of boxes.
-- **The accent is spent sparingly** — primary action, selection, focus. A colour
-  used everywhere stops meaning anything.
-- **The transcript is capped at a readable measure and centred.** Prose set to
-  the full width of a maximised window is the loudest tell that a UI was never
-  designed to be read.
+- **A pure black ground.** `#000000`, not dark grey, so everything above it
+  reads as a light source rather than a lighter box.
+- **Surfaces are translucent white, not opaque colour.** A panel is the ground
+  plus 3.5% white and its edge is the ground plus 9%. One neutral ramp, no hue
+  anywhere in the chrome.
+- **No accent colour.** Primary means the inversion — white ground, black
+  label — and there is exactly one such element on screen at a time. The only
+  colour in the whole interface is a seven-stop spectrum, spent on the mark
+  under the wordmark and on the working indicator, and nowhere else.
+- **Small, quiet type.** 15px body, weight 300 for anything set large, and
+  hover states that dim rather than brighten.
 
-Fonts are Segoe UI, Segoe UI Semibold and Cascadia Mono, each falling back to
-the next best thing. The glyph range is extended past Latin-1 to cover the
+Semantic colours are taken from the spectrum's own stops, so even the error red
+(`#ff4d4d`) belongs to the palette rather than arriving from a stock UI kit.
+The working indicator is a direct port of the site's indeterminate track: a 2px
+rule with a spectrum segment sweeping across it on the same 2.2s cycle.
+
+Type asks for Inter and JetBrains Mono, then falls back through the same chain
+the site declares — which on Windows is Segoe UI, with Cascadia Mono standing in
+for the monospace. The glyph range is extended past Latin-1 to cover the
 punctuation a language model actually writes — em dashes, curly quotes,
 ellipses — which would otherwise render as hollow boxes.
 
@@ -152,6 +168,8 @@ app runs the same loop the CLI does:
 | `src/app.{h,cpp}` | State and the turn loop; the threading rules are documented at the top of the header |
 | `src/ui.cpp` | All rendering |
 | `src/theme.{h,cpp}` | Palette, spacing scale, type ramp, ImGui style |
+| `src/window.{h,cpp}` | Frameless chrome: hit-testing, maximise insets, reduced-motion |
+| `src/anim.h` | Per-widget easing for an immediate-mode UI |
 | `src/chat.{h,cpp}` | UIMessage model, SSE decoder, stream reducer |
 | `src/tools.{h,cpp}` | Local tool execution, path jail, `.gitignore` walker, bash spawning |
 | `src/web.{h,cpp}` | `webFetch`: URL validation, hop-by-hop redirects, content-type routing |
