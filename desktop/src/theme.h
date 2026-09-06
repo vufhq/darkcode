@@ -95,6 +95,10 @@ inline constexpr float kTopBarHeight = 52.0f;
 /// the full width of a maximised window is the single loudest tell that a UI
 /// was never designed to be read.
 inline constexpr float kContentMaxWidth = 740.0f;
+inline constexpr float kSettingsWidth = 760.0f;
+inline constexpr float kSettingsHeight = 620.0f;
+inline constexpr float kSettingsNavWidth = 184.0f;
+inline constexpr float kSettingsFooterHeight = 52.0f;
 
 struct Fonts {
     ImFont* body = nullptr;

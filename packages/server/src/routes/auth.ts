@@ -31,8 +31,7 @@ const app = new Hono<AuthenticatedEnv>()
     const error = c.req.query("error");
     const errorDescription = c.req.query("error_description");
 
-    if (error) return c.text(errorDescription ?? error, 400);
-    if (!code || !state) return c.text("Missing authorization code or state", 400);
+    if (!state || (!code && !error)) return c.text("Missing authorization result or state", 400);
 
     try {
       const [encoded] = state.split(".");
@@ -40,9 +39,19 @@ const app = new Hono<AuthenticatedEnv>()
 
       const payload = JSON.parse(Buffer.from(encoded, "base64url").toString());
       const port = payload.port;
-      if (!port || typeof port !== "number") throw new Error("Invalid port in state");
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid port in state");
 
-      const redirectUrl = `http://localhost:${port}/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
+      // The native client binds IPv4 loopback only. An explicit address avoids
+      // localhost resolving to ::1 first while keeping the callback local-only.
+      const callback = new URL(`http://127.0.0.1:${port}/callback`);
+      callback.searchParams.set("state", state);
+      if (error) {
+        callback.searchParams.set("error", error);
+        if (errorDescription) callback.searchParams.set("error_description", errorDescription);
+      } else {
+        callback.searchParams.set("code", code!);
+      }
+      const redirectUrl = callback.toString();
       return c.redirect(redirectUrl);
     } catch {
       return c.text("Invalid authentication state", 400);

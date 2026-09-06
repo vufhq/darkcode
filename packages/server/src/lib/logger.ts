@@ -11,6 +11,8 @@ export const logger = pino({
       "req.headers.cookie",
       "req.headers['x-darkcode-anthropic-key']",
       "req.headers['x-darkcode-openai-key']",
+      "req.headers['x-darkcode-openai-oauth-token']",
+      "req.headers['x-darkcode-openai-account-id']",
       "req.headers['x-darkcode-deepseek-key']",
       "*.apiKey",
       "*.api_key",

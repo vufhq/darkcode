@@ -5,10 +5,12 @@
 #pragma once
 
 #include <mutex>
+#include <condition_variable>
 #include <string>
 #include <vector>
 
 #include "config.h"
+#include "chatgpt_auth.h"
 #include "http.h"
 #include "json.h"
 
@@ -21,19 +23,33 @@ struct SessionSummary {
     std::string lastActivityAt;
 };
 
+struct SignOutContext {
+    std::string accessToken;
+    std::string apiUrl;
+};
+
 class Api {
 public:
-    explicit Api(Settings& settings);
+    explicit Api(const Settings& settings);
 
     bool signedIn();
     AuthData auth();
+    void setAuth(const AuthData& auth);
+    void setOrigin(const std::string& apiUrl, bool clearCredentials = true);
+    std::string origin();
+    ChatGptAuth& chatGpt() { return chatGpt_; }
     void reloadAuthFromDisk();
-    /// Best-effort server-side revoke; always clears the local token file.
-    void signOut();
+    /// Clears memory and disk synchronously, returning the access token for a
+    /// best-effort revocation on a worker thread.
+    SignOutContext prepareSignOut();
+    void revokeAccessToken(const SignOutContext& context);
 
     HttpResult get(const std::string& path);
     HttpResult post(const std::string& path, const json& body);
-    HttpResult streamChat(const json& body, const StreamSink& sink);
+    bool compactSession(const std::string& id, const std::string& model, std::string& error);
+    HttpResult streamChat(const json& body,
+                          const StreamSink& sink,
+                          const CancelCheck& shouldCancel = {});
 
     /// Convenience wrappers. `error` is filled with a user-facing message.
     bool listSessions(std::vector<SessionSummary>& out, std::string& error);
@@ -45,13 +61,30 @@ public:
     static std::string describe(const HttpResult& result);
 
 private:
-    HttpHeaders headers(bool includeByok);
-    bool ensureFreshToken();
-    bool refresh();
+    struct RequestContext {
+        AuthData auth;
+        std::string apiUrl;
+        unsigned long long generation = 0;
+    };
 
-    Settings& settings_;
+    HttpHeaders headers(const AuthData& auth, bool includeByok);
+    bool inferenceHeaders(const RequestContext& context, const json& body, HttpHeaders& out,
+                          std::string& error, const CancelCheck& cancelled = {});
+    HttpResult postRequest(const std::string& path, const json& body, bool inference);
+    bool requestContext(RequestContext& context);
+    bool contextCurrent(const RequestContext& context);
+    bool refresh(const RequestContext& context);
+    void invalidateAuth(unsigned long long expectedGeneration);
+    static bool validateOrigin(const std::string& apiUrl, std::string& error);
+
     std::mutex mutex_;
+    ChatGptAuth chatGpt_;
+    std::condition_variable refreshCv_;
     AuthData auth_;
+    std::string apiUrl_;
+    bool refreshInProgress_ = false;
+    bool lastRefreshSucceeded_ = false;
+    unsigned long long authGeneration_ = 0;
 };
 
 } // namespace dc

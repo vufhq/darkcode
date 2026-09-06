@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <string_view>
 #include <vector>
 
@@ -12,21 +13,25 @@ namespace {
 
 // Mirrors DEFAULT_POLICY.fs.denyRead in the CLI: files whose contents must
 // never reach the model, whatever the user clicks.
-constexpr std::array<std::string_view, 20> kDenyRead{{
+constexpr std::array<std::string_view, 23> kDenyRead{{
     ".env", ".env.*", "**/.env", "**/.env.*",
     "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx",
     "**/id_rsa", "**/id_ed25519", "**/id_ecdsa",
     "**/.ssh/**", "**/.aws/**", "**/.gnupg/**",
     "**/.npmrc", "**/.pypirc", "**/.netrc", "**/.git-credentials",
     "**/.darkcode/auth.json", "**/.darkcode/api-keys.json",
+    "**/desktop-chatgpt.dpapi*",
+    "**/openai-oauth.json", "**/openai-oauth.json.*.tmp",
 }};
 
 // Mirrors DEFAULT_POLICY.fs.denyWrite.
-constexpr std::array<std::string_view, 11> kDenyWrite{{
+constexpr std::array<std::string_view, 14> kDenyWrite{{
     ".env", ".env.*", "**/.env", "**/.env.*",
     "**/*.pem", "**/*.key",
     "**/id_rsa", "**/id_ed25519",
     "**/.ssh/**", "**/.aws/**", "**/.gnupg/**",
+    "**/desktop-chatgpt.dpapi*",
+    "**/openai-oauth.json", "**/openai-oauth.json.*.tmp",
 }};
 
 // Catastrophic or privilege-escalating commands. Never promptable.
@@ -40,13 +45,14 @@ constexpr std::array<std::string_view, 14> kDenyBash{{
 }};
 
 // Read-only inspection commands that never need a prompt.
-constexpr std::array<std::string_view, 22> kAllowBash{{
-    "git status", "git status **", "git diff", "git diff **",
-    "git log", "git log **", "git show **",
-    "git branch", "git branch **", "git remote", "git remote -v",
+constexpr std::array<std::string_view, 26> kAllowBash{{
+    "git status", "git status --short", "git status --porcelain",
+    "git diff", "git diff --stat", "git diff --cached", "git diff --staged",
+    "git log", "git log --oneline", "git show", "git show --stat",
+    "git branch", "git branch --show-current", "git branch --list", "git remote", "git remote -v",
     "ls", "ls **", "pwd", "wc **", "echo **", "which **",
     "node --version", "bun --version", "npm --version",
-    "bun test", "bun test **",
+    "bun test",
 }};
 
 // Cloud instance-metadata endpoints. Link-local addresses that hand out
@@ -121,6 +127,21 @@ std::string firstWord(const std::string& command) {
     return space == std::string::npos ? command : command.substr(0, space);
 }
 
+bool usesGitNativeOutput(const std::string& command) {
+    std::string shape;
+    shape.reserve(command.size());
+    for (const char c : command) {
+        if (c != '\'' && c != '"' && c != '\\') {
+            shape.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+    }
+    const size_t git = shape.find("git");
+    const bool gitWord = git != std::string::npos &&
+                         (git == 0 || std::isspace(static_cast<unsigned char>(shape[git - 1]))) &&
+                         (git + 3 == shape.size() || std::isspace(static_cast<unsigned char>(shape[git + 3])));
+    return gitWord && shape.find("--output") != std::string::npos;
+}
+
 } // namespace
 
 bool PermissionBroker::isReadProtected(const std::string& projectRelativePath) {
@@ -167,10 +188,30 @@ const char* PermissionBroker::classifyBash(const std::string& command) {
     // like "curl ** | sh" still match.
     if (matchesAny(normalized, kDenyBash.data(), kDenyBash.size())) return "deny";
 
+    // The compact desktop parser does not attempt to interpret nested shell
+    // syntax. Refuse it instead of letting an allowed outer command hide an
+    // arbitrary or hard-denied command, including under auto-approve.
+    if (normalized.find("$(") != std::string::npos || normalized.find('`') != std::string::npos ||
+        normalized.find('<') != std::string::npos || normalized.find('>') != std::string::npos ||
+        normalized.find('\n') != std::string::npos || normalized.find('\r') != std::string::npos) {
+        return "deny";
+    }
+    for (size_t i = 0; i < normalized.size(); ++i) {
+        if (normalized[i] != '&') continue;
+        if (i + 1 < normalized.size() && normalized[i + 1] == '&') {
+            ++i;
+            continue;
+        }
+        return "deny"; // background jobs bypass simple segment classification
+    }
+
     const auto segments = splitCommandSegments(normalized);
     if (segments.empty()) return "deny";
     for (const auto& segment : segments) {
         if (matchesAny(segment, kDenyBash.data(), kDenyBash.size())) return "deny";
+        // Git can write without shell redirection. Refuse its native output
+        // option outright because bash auto-approval cannot enforce path guards.
+        if (usesGitNativeOutput(segment)) return "deny";
     }
     for (const auto& segment : segments) {
         if (!matchesAny(segment, kAllowBash.data(), kAllowBash.size())) return "ask";

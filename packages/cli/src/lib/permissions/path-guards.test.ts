@@ -136,6 +136,24 @@ describe("classifyFsWrite path normalization", () => {
   });
 });
 
+describe("OAuth credentials with the shipped DEFAULT_POLICY", () => {
+  for (const prefix of ["", "./", ".darkcode/", "home/user/.darkcode/", ".darkcode\\"]) {
+    for (const name of ["openai-oauth.json", "openai-oauth.json.0123456789abcdef.tmp"]) {
+      test(`denies reading and writing ${prefix}${name}`, () => {
+        expect(classifyFsRead(prefix + name, DEFAULT_POLICY.fs).decision).toBe("deny");
+        expect(classifyFsWrite(prefix + name, DEFAULT_POLICY.fs).decision).toBe("deny");
+      });
+    }
+  }
+
+  test("leaves unrelated config and OAuth source files accessible", () => {
+    for (const path of [".darkcode/permissions.json", ".darkcode/config.json", "src/openai-oauth.ts", "openai-oauth.json.example", "openai-oauth-lock.sqlite"]) {
+      expect(classifyFsRead(path, DEFAULT_POLICY.fs).decision).toBe("allow");
+      expect(classifyFsWrite(path, DEFAULT_POLICY.fs).decision).toBe("allow");
+    }
+  });
+});
+
 describe("classifyFsWrite with the shipped DEFAULT_POLICY", () => {
   const rules = DEFAULT_POLICY.fs;
 

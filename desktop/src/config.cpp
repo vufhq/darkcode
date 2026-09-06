@@ -99,6 +99,7 @@ bool loadAuth(AuthData& out) {
     if (!parsed.contains("token") || !parsed["token"].is_string()) return false;
     out.token = parsed["token"].get<std::string>();
     out.refreshToken = parsed.value("refreshToken", std::string());
+    out.apiUrl = parsed.value("apiUrl", std::string());
     // The CLI writes epoch milliseconds; tolerate a missing field.
     out.expiresAtMs = parsed.contains("expiresAt") && parsed["expiresAt"].is_number()
                           ? parsed["expiresAt"].get<long long>()
@@ -110,6 +111,7 @@ void saveAuth(const AuthData& auth) {
     json out = json::object();
     out["token"] = auth.token;
     if (!auth.refreshToken.empty()) out["refreshToken"] = auth.refreshToken;
+    if (!auth.apiUrl.empty()) out["apiUrl"] = auth.apiUrl;
     if (auth.expiresAtMs > 0) out["expiresAt"] = auth.expiresAtMs;
     writeWholeFile(authFilePath(), out.dump());
 }

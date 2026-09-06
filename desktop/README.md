@@ -19,7 +19,8 @@ Needs MSVC (VS 2022 or newer with the C++ workload) and the Windows SDK. CMake
 ships with Visual Studio; the path below is the bundled copy.
 
 ```bash
-git clone --depth 1 -b docking https://github.com/vufhq/imgui.git desktop/vendor/imgui
+git clone --filter=blob:none --no-checkout https://github.com/vufhq/imgui.git desktop/vendor/imgui
+git -C desktop/vendor/imgui checkout 646df390032f64eb03f8b5e2e5cbaf0c8e3bb237
 ```
 
 ```bash
@@ -37,26 +38,76 @@ cmake --build desktop/build --config Release
 The binary lands at `desktop/build/bin/darkcode-desktop.exe`. Tests:
 
 ```bash
-./desktop/build/Release/darkcode-desktop-tests.exe
+ctest --test-dir desktop/build -C Release --output-on-failure
 ```
 
 ## Signing in
 
-The desktop app does **not** implement the Clerk OAuth browser flow. It reads
-`~/.darkcode/auth.json`, which the CLI writes — so sign in once with the CLI and
-both clients are authenticated:
+Choose **Sign in with browser** on the desktop sign-in page. The app runs the
+Clerk Authorization Code + PKCE flow itself and accepts the result on a
+temporary `127.0.0.1` callback listener. The listener is closed after sign-in,
+cancellation, or a five-minute timeout.
 
-```bash
-darkcode
-```
-
-Then `/login`, then reopen the desktop app (or press **I have signed in**). Token
-refresh, 401 replay and sign-out all work from the desktop app; only the initial
-login lives in the CLI.
+Credentials remain compatible with the CLI through `~/.darkcode/auth.json`, so
+signing in from either client signs in both. Access-token refresh is
+single-flight, requests retry once after a 401, and final authentication
+failures clear both the in-memory and on-disk session.
 
 BYOK keys are shared the same way, through `~/.darkcode/api-keys.json`, and are
 editable in **Settings**. Desktop-only preferences live in
 `~/.darkcode/desktop.json` and never collide with the CLI's files.
+
+### ChatGPT Model Connection
+
+**Settings > Models > ChatGPT subscription** provides connect, reconnect,
+cancel, disconnect, and status controls for **GPT-5.4 (ChatGPT)**
+(`chatgpt-gpt-5.4`, provider `openai-codex`). This requires a ChatGPT account
+with Codex access. It is separate from both DarkCode/Clerk sign-in and OpenAI
+API keys. Existing GPT API-key entries are unchanged. A disconnected or expired
+connection never falls back to a hosted model or an API key.
+
+The browser flow uses Authorization Code + PKCE S256 at `https://auth.openai.com`,
+with `openid profile email offline_access` scopes and the public Codex client
+ID `app_EMoamEEZ73f0CkXaXp7hrann`. The redirect is
+`http://localhost:1455/auth/callback`; the listener binds only `127.0.0.1:1455`.
+One valid, state-matched callback consumes the attempt. Browser waiting times
+out after five minutes; the token exchange has a separate 30-second deadline.
+Cancellation and shutdown close pending OAuth network requests and the listener.
+A busy port fails explicitly, without cancelling another application's login.
+
+Tokens live only in `~/.darkcode/desktop-chatgpt.dpapi`, encrypted with Windows
+DPAPI for the current Windows user. Atomic replacement preserves refresh-token
+rotation. A `.lock` file grants one desktop process ownership of this store;
+close other desktop windows if it is in use. Neither the CLI's OAuth store nor
+`~/.codex` credentials are read. The model's file tools cannot read or write the
+store or its staging file. DPAPI is not isolation from other programs running
+as the same Windows user.
+
+Before each inference request, including manual compaction, expired access
+tokens are refreshed locally with a single-flight exchange. Only the access
+token (`x-darkcode-openai-oauth-token`) and account ID
+(`x-darkcode-openai-account-id`) are sent to the configured DarkCode server,
+and only for this model. **Connect only if you trust that server.** HTTPS is
+required except for loopback development APIs; credential-bearing redirects
+are not followed. Refresh tokens are sent only to OpenAI's token endpoint.
+Failed or ambiguous refresh rotation requires reconnecting rather than replaying
+an old refresh token. Disconnect invalidates pending results and removes local
+credentials; it does not revoke the OpenAI account's authorization remotely or
+undo requests already sent. DarkCode sign-out does not disconnect ChatGPT.
+
+Use **Settings > Models > Session context > Compact context** to summarize
+earlier messages with the selected model. This sends `summarizerModel` to the
+manual compaction route and uses the same provider authentication as chat.
+
+Public protocol references:
+- [Codex login server](https://github.com/openai/codex/blob/main/codex-rs/login/src/server.rs)
+- [Codex client ID and refresh endpoint](https://github.com/openai/codex/blob/main/codex-rs/login/src/auth/manager.rs)
+
+The current upstream login source also requests connector scopes; desktop
+intentionally requests only the four scopes above. Native regression tests
+cover callback parsing, token/claim validation, rotation parsing, model-specific
+header routing and unsafe-origin refusal. Real browser/account entitlement and
+end-to-end server inference require a live account and are not automated.
 
 ## Using it
 
@@ -70,6 +121,8 @@ editable in **Settings**. Desktop-only preferences live in
 - **Enter** sends, **Ctrl+Enter** inserts a newline.
 - **Stop** aborts a turn: it cancels the stream, releases any tool waiting on a
   permission prompt, and reports the remaining calls back to the model as errors.
+  Network reads poll cancellation once per second, including while the server is
+  quiet.
 
 ### Permissions
 
@@ -186,9 +239,6 @@ app runs the same loop the CLI does:
   / `lspSymbols` return a tool error telling the model to use `grep`/`readFile`.
   The server offers them in both modes, so the model can still call them.
 - **MCP.** No `mcpTools` are advertised, so the model is never offered them.
-- **The login flow.** See above.
-- **`/compact`.** The server compacts automatically at 75% of the context window;
-  the manual `POST /sessions/:id/compact` is not wired to a button.
 
 Three deliberate approximations: the `.gitignore` matcher covers comments,
 negation, anchoring, directory-only rules and `**`, but is not the full git

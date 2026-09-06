@@ -1,4 +1,5 @@
 import { SUPPORTED_CHAT_MODELS } from "@darkcode/shared";
+import { openAIOAuthHeaders } from "../../lib/openai-oauth";
 import {
   AgentsDialogContent,
   AuditDialogContent,
@@ -189,8 +190,8 @@ export const COMMANDS: Command[] = [
       try {
         const res = await apiClient.sessions[":id"].compact.$post({
           param: { id: ctx.sessionId },
-          json: {},
-        });
+          json: { summarizerModel: ctx.model },
+        }, { headers: await openAIOAuthHeaders(ctx.model, apiClient.sessions[":id"].compact.$url({ param: { id: ctx.sessionId } }).toString()) });
         if (!res.ok) throw new Error(await getErrorMessage(res));
         const data = await res.json();
         if (!data.compacted) {

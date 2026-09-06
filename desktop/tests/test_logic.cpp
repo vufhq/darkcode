@@ -6,8 +6,12 @@
 #include <thread>
 
 #include "chat.h"
+#include "chatgpt_auth.h"
+#include "models.h"
 #include "html.h"
+#include "http.h"
 #include "permissions.h"
+#include "oauth.h"
 #include "util.h"
 #include "web.h"
 
@@ -48,6 +52,12 @@ void testBashClassifier() {
     using dc::PermissionBroker;
     checkEqual(PermissionBroker::classifyBash("git status"), "allow", "git status is allowed");
     checkEqual(PermissionBroker::classifyBash("git status --short"), "allow", "git status with args");
+    checkEqual(PermissionBroker::classifyBash("git diff --output=.env"), "deny",
+               "native output options cannot bypass protected writes");
+    checkEqual(PermissionBroker::classifyBash("git diff '--output=.env'"), "deny",
+               "quoting cannot hide a native output option");
+    checkEqual(PermissionBroker::classifyBash("git branch -D main"), "ask",
+               "mutating git branch options are not auto-allowed");
     checkEqual(PermissionBroker::classifyBash("ls src"), "allow", "ls is allowed");
     checkEqual(PermissionBroker::classifyBash("git rev-parse --short HEAD"), "ask",
                "an unlisted git subcommand asks");
@@ -61,6 +71,46 @@ void testBashClassifier() {
     checkEqual(PermissionBroker::classifyBash("git status && npm publish"), "ask",
                "an unlisted segment downgrades an otherwise-allowed line");
     checkEqual(PermissionBroker::classifyBash(""), "deny", "an empty command is denied");
+    checkEqual(PermissionBroker::classifyBash("echo $(sudo whoami)"), "deny",
+               "command substitution cannot hide a denied command");
+    checkEqual(PermissionBroker::classifyBash("git status `npm publish`"), "deny",
+               "backtick substitution is refused");
+    checkEqual(PermissionBroker::classifyBash("git status\nrm -rf build"), "deny",
+               "newlines cannot hide a second command");
+    checkEqual(PermissionBroker::classifyBash("echo ok & sudo whoami"), "deny",
+               "background operators cannot bypass segment classification");
+    checkEqual(PermissionBroker::classifyBash("echo owned > .env"), "deny",
+               "shell redirection cannot bypass protected-file policy");
+}
+
+void testOAuthProtocol() {
+    const unsigned char foo[] = {'f', 'o', 'o'};
+    checkEqual(dc::base64UrlEncode(foo, sizeof(foo)), "Zm9v", "base64url matches RFC encoding");
+    const std::string state = dc::encodeOAuthState(43123, "test-nonce");
+    unsigned short port = 0;
+    std::string nonce;
+    std::string error;
+    check(dc::decodeOAuthState(state, port, nonce, error), "OAuth state round-trips");
+    check(port == 43123, "OAuth state preserves callback port");
+    checkEqual(nonce, "test-nonce", "OAuth state preserves nonce");
+    check(dc::decodeOAuthState(state + ".provider-suffix", port, nonce, error),
+          "OAuth state accepts the provider's dotted suffix");
+
+    const std::string url = dc::buildAuthorizationUrl(
+        "https://clerk.example/", "client id", "https://api.darkcode.sh", state, "challenge");
+    check(url.find("https://clerk.example/oauth/authorize?") == 0, "authorization endpoint");
+    check(url.find("client_id=client%20id") != std::string::npos, "client id is encoded");
+    check(url.find("scope=openid%20email%20profile%20offline_access") != std::string::npos,
+          "offline access scope is requested");
+    check(url.find("code_challenge_method=S256") != std::string::npos, "PKCE S256 is required");
+
+    check(dc::isSafeApiUrl("https://api.darkcode.sh", error), "HTTPS API origin is accepted");
+    check(dc::isSafeApiUrl("http://127.0.0.1:3000", error), "loopback HTTP is accepted for development");
+    check(!dc::isSafeApiUrl("http://api.darkcode.sh", error), "remote plaintext HTTP is refused");
+    check(!dc::isSafeApiUrl("https://user:pass@api.darkcode.sh", error),
+          "API credentials in a URL are refused");
+    check(!dc::isSafeApiUrl("https://api.darkcode.sh?next=evil", error),
+          "API query strings are refused");
 }
 
 void testReadGuards() {
@@ -73,6 +123,21 @@ void testReadGuards() {
     check(!PermissionBroker::isReadProtected("package.json"), "package.json is readable");
     check(PermissionBroker::isWriteProtected(".env"), ".env is write-protected");
     check(!PermissionBroker::isWriteProtected("src/index.ts"), "source is writable");
+    PermissionBroker broker;
+    for (const std::string prefix : {"", "./", ".darkcode/", "home/user/.darkcode/", ".darkcode\\"}) {
+        for (const std::string name : {"openai-oauth.json", "openai-oauth.json.0123456789abcdef.tmp"}) {
+            const auto path = prefix + name;
+            check(PermissionBroker::isReadProtected(path), "CLI OAuth tokens and staging files are read-protected");
+            check(PermissionBroker::isWriteProtected(path), "CLI OAuth tokens and staging files are write-protected");
+            check(!broker.checkRead(path, true).allowed, "auto-approve cannot read CLI OAuth tokens");
+            check(!broker.checkWrite(path, "replacement", true).allowed, "auto-approve cannot overwrite CLI OAuth tokens");
+        }
+    }
+    for (const std::string path : {".darkcode/permissions.json", ".darkcode/config.json", "src/openai-oauth.ts",
+                                   "openai-oauth.json.example", "openai-oauth-lock.sqlite"}) {
+        check(!PermissionBroker::isReadProtected(path), "unrelated OAuth/config files remain readable");
+        check(!PermissionBroker::isWriteProtected(path), "unrelated OAuth/config files remain writable");
+    }
 }
 
 void testSseDecoder() {
@@ -199,6 +264,11 @@ void testPermissionBroker() {
         dc::PermissionBroker broker;
         const dc::PermissionOutcome outcome = broker.checkRead("packages/server/.env", true);
         check(!outcome.allowed, "a protected read is refused even with auto-approve on");
+    }
+    {
+        dc::PermissionBroker broker;
+        const dc::PermissionOutcome outcome = broker.checkBash("git diff --output=.env", true);
+        check(!outcome.allowed, "native protected writes are refused even with shell auto-approve on");
     }
 }
 
@@ -347,12 +417,94 @@ void testTextHelpers() {
     checkEqual(dc::trim("  padded \n"), "padded", "trim");
 }
 
+void testChatGptOAuth() {
+    const auto* model = dc::findModel(dc::kChatGptModel);
+    check(model && model->displayName == "GPT-5.4 (ChatGPT)" && !model->requiresApiKey && model->byokProvider.empty() &&
+          model->oauthProvider == dc::kChatGptProvider,
+          "ChatGPT model is separate from BYOK");
+    check(dc::findModel("gpt-5.4")->byokProvider == "openai", "API-key OpenAI entry unchanged");
+    check(dc::kChatGptProvider == "openai-codex", "distinct OAuth provider");
+    const auto url = dc::chatGptAuthorizationUrl("state", "challenge");
+    check(url.starts_with("https://auth.openai.com/oauth/authorize?"), "fixed OAuth issuer");
+    check(url.find("client_id=app_EMoamEEZ73f0CkXaXp7hrann") != std::string::npos, "public Codex client id");
+    check(url.find("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback") != std::string::npos, "registered localhost callback");
+    check(url.find("scope=openid%20profile%20email%20offline_access") != std::string::npos, "minimal agreed scopes");
+    check(url.find("code_challenge_method=S256") != std::string::npos, "PKCE S256");
+    std::string code, error;
+    check(dc::parseChatGptCallback("/auth/callback?state=state&code=a%2Bb", "state", code, error) && code == "a+b", "callback code decoded");
+    check(!dc::parseChatGptCallback("/auth/callback?state=wrong&code=secret", "state", code, error) && code.empty(), "state mismatch refused");
+    check(!dc::parseChatGptCallback("/callback?state=state&code=x", "state", code, error), "Clerk callback not accepted");
+    check(!dc::parseChatGptCallback("/auth/callback?state=state&state=state&code=x", "state", code, error), "duplicate state refused");
+    check(!dc::parseChatGptCallback("/auth/callback?state=state&%73tate=state&code=x", "state", code, error), "encoded duplicate refused");
+    check(!dc::parseChatGptCallback("/auth/callback?state=state&code=%zz", "state", code, error), "bad percent escape refused");
+    check(!dc::parseChatGptCallback("/auth/callback?state=state&code=x%0D%0Aevil", "state", code, error), "control characters refused");
+    check(dc::parseChatGptCallback("/auth/callback?state=state&error=access_denied&error_description=secret-token", "state", code, error) &&
+          code.empty() && error.find("secret-token") == std::string::npos, "provider denial sanitized");
+    check(!dc::parseChatGptCallback("/auth/callback?state=wrong&error=access_denied", "state", code, error), "error callbacks also require valid state");
+    const auto now = dc::nowMs();
+    const auto jwt = [](const dc::json& value) {
+        const auto raw = value.dump();
+        return "e30." + dc::base64UrlEncode(reinterpret_cast<const unsigned char*>(raw.data()), raw.size()) + ".signature";
+    };
+    dc::json response{{"access_token", jwt(dc::json{{"exp", now / 1000 + 3600},
+        {"https://api.openai.com/auth", {{"chatgpt_account_id", "account-1"}}}})},
+        {"refresh_token", "refresh-1"}, {"expires_in", 3600}, {"token_type", "Bearer"}};
+    dc::ChatGptTokens tokens;
+    check(dc::parseChatGptTokens(response, {}, tokens, now) && tokens.accountId == "account-1", "account and expiry from access JWT");
+    auto idResponse = response;
+    idResponse["id_token"] = response["access_token"];
+    idResponse["access_token"] = "opaque-access";
+    check(dc::parseChatGptTokens(idResponse, {}, tokens, now), "ID JWT account with opaque access token");
+    auto bad = response;
+    bad["access_token"] = 42;
+    check(!dc::parseChatGptTokens(bad, {}, tokens, now), "wrong token type refused without exception");
+    bad = response; bad["expires_in"] = 1e30;
+    check(!dc::parseChatGptTokens(bad, {}, tokens, now), "overflow expiry refused");
+    bad = idResponse; bad.erase("expires_in");
+    check(!dc::parseChatGptTokens(bad, {}, tokens, now), "unknown access expiry refused");
+    bad = response; bad["expires_in"] = 0;
+    check(!dc::parseChatGptTokens(bad, {}, tokens, now), "expired tokens refused");
+    bad = response; bad.erase("refresh_token");
+    check(!dc::parseChatGptTokens(bad, {}, tokens, now), "initial login needs refresh token");
+    bad = response; bad["id_token"] = jwt(dc::json{{"https://api.openai.com/auth", {{"chatgpt_account_id", "other-account"}}}});
+    check(!dc::parseChatGptTokens(bad, {}, tokens, now), "conflicting JWT accounts refused");
+    dc::ChatGptTokens rotated;
+    response["refresh_token"] = "refresh-2";
+    check(dc::parseChatGptTokens(response, tokens, rotated, now) && rotated.refreshToken == "refresh-2", "refresh rotation retained");
+    response.erase("refresh_token");
+    check(dc::parseChatGptTokens(response, rotated, tokens, now) && tokens.refreshToken == "refresh-2", "omitted rotation preserves refresh token");
+    auto previous = tokens; previous.accountId = "other";
+    check(!dc::parseChatGptTokens(response, previous, rotated, now), "refresh cannot switch accounts");
+    dc::HttpHeaders headers;
+    check(dc::appendChatGptHeaders("gpt-5.4", "http://example.com", tokens, headers, error) && headers.empty(), "no OAuth headers on API-key model");
+    check(dc::appendChatGptHeaders("darkcode-ai", "https://api.darkcode.sh", tokens, headers, error) && headers.empty(), "no OAuth headers on hosted model");
+    check(dc::appendChatGptHeaders(dc::kChatGptModel, "https://api.darkcode.sh", tokens, headers, error) && headers.size() == 2, "OAuth model gets exactly two provider headers");
+    check(headers[0].first == "x-darkcode-openai-oauth-token" && headers[1].first == "x-darkcode-openai-account-id", "agreed header names");
+    check(headers[0].second == tokens.accessToken && headers[1].second == tokens.accountId, "access token and account only, never refresh");
+    headers.clear();
+    check(!dc::appendChatGptHeaders(dc::kChatGptModel, "http://example.com", tokens, headers, error) && headers.empty(), "non-loopback plaintext refused");
+    check(!dc::appendChatGptHeaders(dc::kChatGptModel, "https://user:pw@example.com", tokens, headers, error), "URL userinfo refused");
+    check(dc::appendChatGptHeaders(dc::kChatGptModel, "http://127.0.0.1:3000", tokens, headers, error), "loopback development allowed");
+    headers.clear();
+    tokens.expiresAtMs = now - 1;
+    check(!dc::appendChatGptHeaders(dc::kChatGptModel, "https://api.darkcode.sh", tokens, headers, error) && headers.empty(), "expired OAuth fails closed");
+    check(!dc::appendChatGptHeaders(dc::kChatGptModel, "https://api.darkcode.sh", {}, headers, error) && headers.empty(), "disconnected OAuth fails closed");
+    tokens.expiresAtMs = now + 3600000;
+    tokens.accountId = "account\r\nInjected: value";
+    check(!dc::appendChatGptHeaders(dc::kChatGptModel, "https://api.darkcode.sh", tokens, headers, error) && headers.empty(), "account header injection refused");
+    check(dc::PermissionBroker::isReadProtected(".darkcode/desktop-chatgpt.dpapi"), "DPAPI credential file protected from tools");
+    check(dc::PermissionBroker::isWriteProtected(".darkcode/desktop-chatgpt.dpapi.tmp"), "DPAPI staging file protected from writes");
+    check(dc::PermissionBroker::isReadProtected("desktop-chatgpt.dpapi"), "credential protection survives project rooted in .darkcode");
+}
+
 } // namespace
 
 int main() {
     std::printf("darkcode-desktop tests\n");
     testGlob();
     testBashClassifier();
+    testOAuthProtocol();
+    testChatGptOAuth();
     testReadGuards();
     testSseDecoder();
     testPermissionBroker();

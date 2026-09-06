@@ -6,6 +6,8 @@
 # verifies its checksum, installs it to %USERPROFILE%\.darkcode\bin, and adds
 # that to your user PATH. Override the install dir with $env:DARKCODE_INSTALL.
 
+# TODO: Redesign the download animations for every OS
+
 $ErrorActionPreference = 'Stop'
 
 $repo = if ($env:DARKCODE_REPO) { $env:DARKCODE_REPO } else { 'vufhq/darkcode' }

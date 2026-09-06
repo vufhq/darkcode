@@ -25,8 +25,12 @@ std::string lastErrorMessage(const char* stage) {
 struct ParsedUrl {
     std::wstring host;
     std::wstring path;
+    std::wstring user;
+    std::wstring password;
     INTERNET_PORT port = 0;
     bool secure = false;
+    bool http = false;
+    bool hasQueryOrFragment = false;
     bool valid = false;
 };
 
@@ -38,6 +42,8 @@ ParsedUrl parseUrl(const std::string& url) {
     components.dwStructSize = sizeof(components);
     components.dwSchemeLength = static_cast<DWORD>(-1);
     components.dwHostNameLength = static_cast<DWORD>(-1);
+    components.dwUserNameLength = static_cast<DWORD>(-1);
+    components.dwPasswordLength = static_cast<DWORD>(-1);
     components.dwUrlPathLength = static_cast<DWORD>(-1);
     components.dwExtraInfoLength = static_cast<DWORD>(-1);
 
@@ -46,6 +52,12 @@ ParsedUrl parseUrl(const std::string& url) {
     }
 
     parsed.host.assign(components.lpszHostName, components.dwHostNameLength);
+    if (components.dwUserNameLength > 0) {
+        parsed.user.assign(components.lpszUserName, components.dwUserNameLength);
+    }
+    if (components.dwPasswordLength > 0) {
+        parsed.password.assign(components.lpszPassword, components.dwPasswordLength);
+    }
     parsed.path.assign(components.lpszUrlPath, components.dwUrlPathLength);
     if (components.dwExtraInfoLength > 0) {
         parsed.path.append(components.lpszExtraInfo, components.dwExtraInfoLength);
@@ -53,7 +65,13 @@ ParsedUrl parseUrl(const std::string& url) {
     if (parsed.path.empty()) parsed.path = L"/";
     parsed.port = components.nPort;
     parsed.secure = components.nScheme == INTERNET_SCHEME_HTTPS;
-    parsed.valid = true;
+    parsed.http = components.nScheme == INTERNET_SCHEME_HTTP;
+    if (components.dwExtraInfoLength > 0) {
+        const std::wstring_view extra(components.lpszExtraInfo, components.dwExtraInfoLength);
+        parsed.hasQueryOrFragment = extra.find(L'?') != std::wstring_view::npos ||
+                                    extra.find(L'#') != std::wstring_view::npos;
+    }
+    parsed.valid = (parsed.secure || parsed.http) && !parsed.host.empty();
     return parsed;
 }
 
@@ -68,7 +86,7 @@ bool sendRequest(const std::string& method,
                  Handle& connect,
                  Handle& request,
                  std::string& error,
-                 bool followRedirects = true) {
+                 bool followRedirects = false) {
     session.reset(::WinHttpOpen(L"DarkCode-Desktop/1.0",
                                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                 WINHTTP_NO_PROXY_NAME,
@@ -104,19 +122,29 @@ bool sendRequest(const std::string& method,
 
     if (!followRedirects) {
         DWORD disable = WINHTTP_DISABLE_REDIRECTS;
-        ::WinHttpSetOption(request.get(), WINHTTP_OPTION_DISABLE_FEATURE, &disable, sizeof(disable));
+        if (!::WinHttpSetOption(request.get(), WINHTTP_OPTION_DISABLE_FEATURE, &disable, sizeof(disable))) {
+            error = "Could not disable HTTP redirects; credentials were not sent.";
+            return false;
+        }
     }
 
     std::wstring headerBlock;
     for (const auto& [name, value] : headers) {
         if (name.empty() || value.empty()) continue;
+        if (name.find_first_of("\r\n") != std::string::npos || value.find_first_of("\r\n") != std::string::npos) {
+            error = "Invalid HTTP header; credentials were not sent.";
+            return false;
+        }
         headerBlock += toWide(name) + L": " + toWide(value) + L"\r\n";
     }
     if (!headerBlock.empty()) {
-        ::WinHttpAddRequestHeaders(request.get(),
-                                   headerBlock.c_str(),
-                                   static_cast<DWORD>(headerBlock.size()),
-                                   WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+        if (!::WinHttpAddRequestHeaders(request.get(),
+                                    headerBlock.c_str(),
+                                    static_cast<DWORD>(headerBlock.size()),
+                                    WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) {
+            error = "Could not set HTTP headers; the request was not sent.";
+            return false;
+        }
     }
 
     const BOOL sent = ::WinHttpSendRequest(request.get(),
@@ -169,11 +197,25 @@ std::string queryHeader(HINTERNET request, const wchar_t* name) {
 
 /// Drains the response. `sink` may be null, in which case everything is
 /// appended to `body`.
-bool readBody(HINTERNET request, const StreamSink* sink, std::string& body, bool& aborted, std::string& error) {
+bool readBody(HINTERNET request,
+              const StreamSink* sink,
+              const CancelCheck* shouldCancel,
+              std::string& body,
+              bool& aborted,
+              std::string& error) {
     std::string buffer;
     for (;;) {
+        if (shouldCancel && *shouldCancel && (*shouldCancel)()) {
+            aborted = true;
+            return true;
+        }
         DWORD available = 0;
         if (!::WinHttpQueryDataAvailable(request, &available)) {
+            const DWORD code = ::GetLastError();
+            // Streaming requests use a short per-read timeout so Stop can be
+            // observed even while the server is quiet. A timeout is a poll,
+            // not a failed turn.
+            if (code == ERROR_WINHTTP_TIMEOUT && shouldCancel) continue;
             error = lastErrorMessage("WinHttpQueryDataAvailable");
             return false;
         }
@@ -204,7 +246,8 @@ HttpResult httpRequest(const std::string& method,
                        const std::string& url,
                        const HttpHeaders& headers,
                        const std::string& body,
-                       int timeoutMs) {
+                       int timeoutMs,
+                       bool followRedirects) {
     HttpResult result;
 
     const ParsedUrl parsed = parseUrl(url);
@@ -214,13 +257,14 @@ HttpResult httpRequest(const std::string& method,
     }
 
     Handle session, connect, request;
-    if (!sendRequest(method, parsed, headers, body, timeoutMs, session, connect, request, result.error)) {
+    if (!sendRequest(method, parsed, headers, body, timeoutMs, session, connect, request,
+                     result.error, followRedirects)) {
         return result;
     }
 
     result.status = queryStatus(request.get());
     bool aborted = false;
-    if (!readBody(request.get(), nullptr, result.body, aborted, result.error)) {
+    if (!readBody(request.get(), nullptr, nullptr, result.body, aborted, result.error)) {
         return result;
     }
     return result;
@@ -230,8 +274,13 @@ HttpResult httpStream(const std::string& method,
                       const std::string& url,
                       const HttpHeaders& headers,
                       const std::string& body,
-                      const StreamSink& sink) {
+                       const StreamSink& sink,
+                       const CancelCheck& shouldCancel) {
     HttpResult result;
+    if (shouldCancel && shouldCancel()) {
+        result.aborted = true;
+        return result;
+    }
 
     const ParsedUrl parsed = parseUrl(url);
     if (!parsed.valid) {
@@ -242,15 +291,23 @@ HttpResult httpStream(const std::string& method,
     Handle session, connect, request;
     // 5 minutes between reads: the gap before the first token on a slow model
     // plus any tool-call pause on the server side.
-    if (!sendRequest(method, parsed, headers, body, 300000, session, connect, request, result.error)) {
+    if (!sendRequest(method, parsed, headers, body, 300000, session, connect, request,
+                     result.error, /*followRedirects=*/false)) {
         return result;
     }
+
+    // Keep five minutes for the response headers, then poll the body at one
+    // second intervals so cancellation is bounded without timing out a model.
+    DWORD bodyReadTimeoutMs = 1000;
+    ::WinHttpSetOption(request.get(), WINHTTP_OPTION_RECEIVE_TIMEOUT,
+                       &bodyReadTimeoutMs, sizeof(bodyReadTimeoutMs));
 
     result.status = queryStatus(request.get());
 
     const bool streaming = result.status >= 200 && result.status < 300;
     bool aborted = false;
-    readBody(request.get(), streaming ? &sink : nullptr, result.body, aborted, result.error);
+    readBody(request.get(), streaming ? &sink : nullptr,
+             shouldCancel ? &shouldCancel : nullptr, result.body, aborted, result.error);
     result.aborted = aborted;
     return result;
 }
@@ -290,10 +347,35 @@ HttpFetchResult httpFetchOnce(const std::string& url,
         result.body.append(data, length);
         return true;
     };
-    readBody(request.get(), &sink, result.body, aborted, error);
+    readBody(request.get(), &sink, nullptr, result.body, aborted, error);
     if (!error.empty() && result.body.empty()) result.error = error;
 
     return result;
+}
+
+bool isSafeApiUrl(std::string_view url, std::string& error) {
+    const ParsedUrl parsed = parseUrl(std::string(url));
+    if (!parsed.valid) {
+        error = "Enter a valid HTTP or HTTPS API URL.";
+        return false;
+    }
+    if (!parsed.user.empty() || !parsed.password.empty()) {
+        error = "The API URL cannot contain a username or password.";
+        return false;
+    }
+    if (parsed.hasQueryOrFragment) {
+        error = "The API URL cannot contain a query string or fragment.";
+        return false;
+    }
+
+    const std::string host = toLower(toUtf8(parsed.host));
+    const bool loopback = host == "localhost" || host == "127.0.0.1" || host == "::1";
+    if (!parsed.secure && !loopback) {
+        error = "DarkCode requires HTTPS except for a loopback development API.";
+        return false;
+    }
+    error.clear();
+    return true;
 }
 
 } // namespace dc

@@ -1,4 +1,6 @@
 import { useCallback } from "react";
+import { openAIOAuth } from "../../lib/openai-oauth";
+import { ChatGPTAuthDialogContent } from "./chatgpt-auth-dialog";
 import { TextAttributes } from "@opentui/core";
 import { useDialog } from "../../providers/dialog";
 import { useToast } from "../../providers/toast";
@@ -30,6 +32,10 @@ export const ModelsDialogContent = ({
       const definition = findSupportedChatModel(modelId);
       if (!definition) return;
       const displayName = definition.displayName;
+      if (definition.provider === "openai-codex" && !openAIOAuth.connected()) {
+        dialog.open({ title: "Connect ChatGPT", children: <ChatGPTAuthDialogContent /> });
+        return;
+      }
 
       // Only force a key when the model can't run on DarkCode credits. Hostable
       // models (canBeHosted) run on credits without a key — the user can still
@@ -95,7 +101,7 @@ export const ModelsDialogContent = ({
         // "BYOK" = the user's own key; "Pro" = a premium hosted model (needs a
         // Pro subscription); "Credits" = a hostable model with no key yet (runs
         // on our infra, billed to credits); "Needs key" = BYOK-only.
-        const tag = !requiresKey
+        const tag = definition?.provider === "openai-codex" ? (openAIOAuth.connected() ? "ChatGPT" : "Connect") : !requiresKey
           ? canBeHosted
             ? "Hosted"
             : "Local"

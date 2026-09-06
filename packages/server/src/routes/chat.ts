@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { OpenAIOAuthRequiredError, readOpenAIOAuthHeaders } from "../lib/openai-codex";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import {
@@ -17,6 +18,7 @@ import { db } from "@darkcode/database/client";
 import type { Prisma } from "@darkcode/database";
 import {
   BYOK_PROVIDERS,
+  CHATGPT_MODEL_ID,
   BYOK_PROVIDER_HEADER,
   BYOK_PROVIDER_LABELS,
   findSupportedChatModel,
@@ -227,8 +229,10 @@ const app = new Hono<AuthenticatedEnv>()
       // size is known.
       let creditsBalance: number | null = null;
       try {
-        resolvedModel = resolveChatModel(effectiveModelId, apiKeys);
+        resolvedModel = resolveChatModel(effectiveModelId, apiKeys,
+          effectiveModelId === CHATGPT_MODEL_ID ? readOpenAIOAuthHeaders(c.req.raw.headers) : undefined);
       } catch (error) {
+        if (error instanceof OpenAIOAuthRequiredError) return c.json({ error: error.message, provider: "openai-codex" }, 400);
         if (error instanceof ApiKeyRequiredError) {
           return c.json(
             {

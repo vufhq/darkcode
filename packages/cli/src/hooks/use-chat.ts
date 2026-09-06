@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { openAIOAuthHeaders, oauthSafeFetch } from "../lib/openai-oauth";
 import { useChat as useAiChat } from "@ai-sdk/react";
 import {
   DefaultChatTransport,
@@ -109,6 +110,7 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
   const transport = useMemo(() => {
     return new DefaultChatTransport<Message>({
       api: apiClient.chat.$url().toString(),
+      fetch: oauthSafeFetch as typeof fetch,
       headers() {
         const auth = getAuth();
         const headers = new Headers();
@@ -126,7 +128,7 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
         }
         return headers;
       },
-      prepareSendMessagesRequest({ messages }) {
+      async prepareSendMessagesRequest({ messages, headers }) {
         const message = messages[messages.length - 1];
         if (!message) throw new Error("No message to send");
 
@@ -141,8 +143,12 @@ export function useChat(sessionId: string, initialMessages: Message[]) {
 
         const mcpTools = mcpToolsRef.current;
         const todos = getTodos(sessionId);
+        const model = message.metadata?.model ?? metadata?.model;
+        const requestHeaders = new Headers(headers);
+        for (const [name, value] of Object.entries(await openAIOAuthHeaders(model ?? "", apiClient.chat.$url().toString()))) requestHeaders.set(name, value);
 
         return {
+          headers: requestHeaders,
           body: {
             id: sessionId,
             messages: requestMessages,

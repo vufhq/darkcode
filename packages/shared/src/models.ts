@@ -24,6 +24,7 @@ export type SupportedProvider =
   | "darkcode"
   | "anthropic"
   | "openai"
+  | "openai-codex"
   | "openai-compatible"
   | "google"
   | "ollama";
@@ -141,6 +142,7 @@ type OllamaModelDefinition = BaseModelDefinition & {
 };
 
 type SupportedChatModelDefinition =
+  | (BaseModelDefinition & { provider: "openai-codex"; requiresApiKey: false; upstreamModelId: string })
   | DarkcodeModelDefinition
   | AnthropicModelDefinition
   | OpenAIModelDefinition
@@ -149,6 +151,16 @@ type SupportedChatModelDefinition =
   | OllamaModelDefinition;
 
 export const SUPPORTED_CHAT_MODELS = [
+  {
+    id: "chatgpt-gpt-5.4",
+    provider: "openai-codex",
+    displayName: "GPT-5.4 (ChatGPT)",
+    upstreamModelId: "gpt-5.4",
+    requiresApiKey: false,
+    canBeHosted: false,
+    pricing: { inputUsdPerMillionTokens: 0, outputUsdPerMillionTokens: 0 },
+    contextWindow: 400_000,
+  },
   {
     id: "darkcode-ai",
     provider: "darkcode",

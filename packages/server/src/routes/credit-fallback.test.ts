@@ -121,11 +121,20 @@ describe("registry invariants the billing path relies on", () => {
 
   test("only the hosted darkcode provider is keyless-and-paid; ollama is keyless-and-free", () => {
     const keyless = SUPPORTED_CHAT_MODELS.filter((m) => !m.requiresApiKey);
-    expect(keyless.map((m) => m.id).sort()).toEqual(["darkcode-ai", "ollama-default"]);
+    expect(keyless.map((m) => m.id).sort()).toEqual(["chatgpt-gpt-5.4", "darkcode-ai", "ollama-default"]);
     const ollama = findSupportedChatModel("ollama-default");
     expect(ollama?.pricing).toEqual({
       inputUsdPerMillionTokens: 0,
       outputUsdPerMillionTokens: 0,
     });
   });
+});
+
+test("ChatGPT OAuth cannot fall back to hosted or API-key inference", () => {
+  const model = findSupportedChatModel("chatgpt-gpt-5.4");
+  expect(model?.canBeHosted).toBe(false);
+  expect(model?.provider).toBe("openai-codex");
+  expect(getModelByokProvider("chatgpt-gpt-5.4")).toBeNull();
+  expect(getModelFallbackId("chatgpt-gpt-5.4")).toBeNull();
+  expect(canFallbackOnDepletion("chatgpt-gpt-5.4", { openai: "api-key" })).toBe(false);
 });

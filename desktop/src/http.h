@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -22,12 +23,18 @@ struct HttpResult {
 
 /// Return false from the sink to abort the transfer (used by the Stop button).
 using StreamSink = std::function<bool(const char* data, size_t length)>;
+using CancelCheck = std::function<bool()>;
 
 HttpResult httpRequest(const std::string& method,
                        const std::string& url,
                        const HttpHeaders& headers,
                        const std::string& body,
-                       int timeoutMs = 60000);
+                       int timeoutMs = 60000,
+                       bool followRedirects = false);
+
+/// API origins may use HTTP only on loopback. User info, query strings and
+/// fragments are rejected so credentials cannot be redirected or misrouted.
+bool isSafeApiUrl(std::string_view url, std::string& error);
 
 /// Streams a 2xx response body through `sink` as it arrives. A non-2xx status
 /// is read whole into `HttpResult::body` instead, so callers can surface the
@@ -36,7 +43,8 @@ HttpResult httpStream(const std::string& method,
                       const std::string& url,
                       const HttpHeaders& headers,
                       const std::string& body,
-                      const StreamSink& sink);
+                      const StreamSink& sink,
+                      const CancelCheck& shouldCancel = {});
 
 struct HttpFetchResult {
     long status = 0;

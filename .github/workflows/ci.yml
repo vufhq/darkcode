@@ -15,6 +15,43 @@ permissions:
   contents: read
 
 jobs:
+  desktop:
+    name: Desktop build + test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch pinned desktop dependencies
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/vufhq/imgui.git desktop/vendor/imgui
+          git -C desktop/vendor/imgui checkout 646df390032f64eb03f8b5e2e5cbaf0c8e3bb237
+          New-Item -ItemType Directory -Path desktop/vendor/json -Force | Out-Null
+          $jsonPath = 'desktop/vendor/json/json.hpp'
+          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp' -OutFile $jsonPath
+          $actual = (Get-FileHash $jsonPath -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne '9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6') {
+            throw "nlohmann/json checksum mismatch: $actual"
+          }
+
+      - name: Configure desktop
+        run: cmake -S desktop -B desktop/build-ci -A x64
+
+      - name: Build desktop
+        run: cmake --build desktop/build-ci --config Release --parallel
+
+      - name: Test desktop
+        run: ctest --test-dir desktop/build-ci -C Release --output-on-failure
+
+      - name: Upload desktop executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: darkcode-desktop-windows-x64
+          path: |
+            desktop/build-ci/bin/darkcode-desktop.exe
+            desktop/build-ci/bin/assets
+          if-no-files-found: error
+
   test:
     name: Test + typecheck
     runs-on: ubuntu-latest

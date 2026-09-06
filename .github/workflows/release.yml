@@ -1,7 +1,8 @@
 name: Release
 
-# Builds the standalone `darkcode` CLI binaries and attaches them to a GitHub
-# Release. Triggered by pushing a `v*` tag (e.g. `git tag v1.0.0 && git push
+# Builds the standalone CLI binaries and native Windows desktop app, then
+# attaches them to a GitHub Release. Triggered by pushing a `v*` tag (e.g.
+# `git tag v1.0.0 && git push
 # --tags`), or manually via the Actions tab.
 #
 # Binaries are built on a native runner per platform — NOT cross-compiled —
@@ -144,3 +145,62 @@ jobs:
             files=("${{ matrix.asset }}.tar.gz" "${{ matrix.asset }}.tar.gz.sha256")
           fi
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
+
+  desktop:
+    name: darkcode-desktop-windows-x64
+    needs: create-release
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch pinned desktop dependencies
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/vufhq/imgui.git desktop/vendor/imgui
+          git -C desktop/vendor/imgui checkout 646df390032f64eb03f8b5e2e5cbaf0c8e3bb237
+          New-Item -ItemType Directory -Path desktop/vendor/json -Force | Out-Null
+          $jsonPath = 'desktop/vendor/json/json.hpp'
+          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp' -OutFile $jsonPath
+          $actual = (Get-FileHash $jsonPath -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne '9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6') {
+            throw "nlohmann/json checksum mismatch: $actual"
+          }
+
+      - name: Configure desktop
+        run: cmake -S desktop -B desktop/build-release -A x64
+
+      - name: Build desktop
+        run: cmake --build desktop/build-release --config Release --parallel
+
+      - name: Test desktop
+        run: ctest --test-dir desktop/build-release -C Release --output-on-failure
+
+      - name: Sign executable
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERTIFICATE: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE)) {
+            Write-Host 'Windows signing certificate is not configured; publishing an unsigned desktop build.'
+            exit 0
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'darkcode-signing.pfx'
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERTIFICATE))
+          signtool.exe sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificatePath /p $env:WINDOWS_SIGNING_PASSWORD desktop/build-release/bin/darkcode-desktop.exe
+          Remove-Item -LiteralPath $certificatePath -Force
+
+      - name: Package desktop
+        shell: pwsh
+        run: |
+          $asset = 'darkcode-desktop-windows-x64.zip'
+          Compress-Archive -Path desktop/build-release/bin/darkcode-desktop.exe,desktop/build-release/bin/assets -DestinationPath $asset -Force
+          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
+          "$hash  $asset" | Out-File -Encoding ascii "$asset.sha256"
+
+      - name: Upload desktop assets
+        shell: pwsh
+        run: gh release upload $env:TAG --repo $env:GITHUB_REPOSITORY --clobber darkcode-desktop-windows-x64.zip darkcode-desktop-windows-x64.zip.sha256
