@@ -1,6 +1,5 @@
 // On-disk state shared with the DarkCode CLI (~/.darkcode), plus this app's
-// own settings file. The CLI owns the login flow; the desktop app reads the
-// same auth.json so `darkcode` + /login signs both of them in.
+// own settings file. Either client can sign in and both consume auth.json.
 #pragma once
 
 #include <map>
@@ -11,6 +10,7 @@ namespace dc {
 struct AuthData {
     std::string token;
     std::string refreshToken;
+    std::string apiUrl; // issuing origin; absent in older CLI-compatible files
     long long expiresAtMs = 0; // 0 = unknown, treated as "not expired"
 
     bool valid() const { return !token.empty(); }

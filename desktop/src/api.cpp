@@ -14,7 +14,7 @@ std::string joinUrl(const std::string& base, const std::string& path) {
 
 } // namespace
 
-Api::Api(Settings& settings) : settings_(settings) {
+Api::Api(const Settings& settings) : apiUrl_(settings.apiUrl) {
     loadAuth(auth_);
 }
 
@@ -28,21 +28,70 @@ AuthData Api::auth() {
     return auth_;
 }
 
-void Api::reloadAuthFromDisk() {
-    AuthData fresh;
-    const bool ok = loadAuth(fresh);
+void Api::setAuth(const AuthData& auth) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auth_ = ok ? fresh : AuthData{};
+    AuthData bound = auth;
+    bound.apiUrl = apiUrl_;
+    saveAuth(bound);
+    auth_ = std::move(bound);
+    ++authGeneration_;
 }
 
-void Api::signOut() {
-    if (signedIn()) {
-        // Best effort: a network failure must never strand the user signed in.
-        post("/auth/logout", json::object());
-    }
-    clearAuth();
+void Api::setOrigin(const std::string& apiUrl, bool clearCredentials) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (apiUrl_ == apiUrl) return;
+    const std::string credentialOrigin = auth_.apiUrl.empty() ? "https://api.darkcode.sh" : auth_.apiUrl;
+    if (clearCredentials || (auth_.valid() && credentialOrigin != apiUrl)) {
+        clearAuth();
+        auth_ = AuthData{};
+    }
+    apiUrl_ = apiUrl;
+    ++authGeneration_;
+}
+
+std::string Api::origin() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return apiUrl_;
+}
+
+void Api::reloadAuthFromDisk() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AuthData fresh;
+    const bool ok = loadAuth(fresh);
+    const std::string credentialOrigin = fresh.apiUrl.empty() ? "https://api.darkcode.sh" : fresh.apiUrl;
+    auth_ = ok && credentialOrigin == apiUrl_ ? fresh : AuthData{};
+    ++authGeneration_;
+}
+
+SignOutContext Api::prepareSignOut() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    SignOutContext context{auth_.token, apiUrl_};
+    clearAuth();
     auth_ = AuthData{};
+    ++authGeneration_;
+    return context;
+}
+
+void Api::revokeAccessToken(const SignOutContext& context) {
+    if (context.accessToken.empty()) return;
+    std::string originError;
+    if (!validateOrigin(context.apiUrl, originError)) return;
+    const HttpHeaders headers{{"Content-Type", "application/json"},
+                              {"Authorization", "Bearer " + context.accessToken}};
+    httpRequest("POST", joinUrl(context.apiUrl, "/auth/logout"), headers,
+                json::object().dump(), 30000, false);
+}
+
+void Api::invalidateAuth(unsigned long long expectedGeneration) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (authGeneration_ != expectedGeneration) return;
+    clearAuth();
+    auth_ = AuthData{};
+    ++authGeneration_;
+}
+
+bool Api::validateOrigin(const std::string& apiUrl, std::string& error) {
+    return isSafeApiUrl(apiUrl, error);
 }
 
 std::string Api::describe(const HttpResult& result) {
@@ -59,15 +108,12 @@ std::string Api::describe(const HttpResult& result) {
     return "Request failed with status " + std::to_string(result.status);
 }
 
-HttpHeaders Api::headers(bool includeByok) {
+HttpHeaders Api::headers(const AuthData& auth, bool includeByok) {
     HttpHeaders out;
     out.emplace_back("Content-Type", "application/json");
     out.emplace_back("Accept", "application/json, text/event-stream");
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (auth_.valid()) out.emplace_back("Authorization", "Bearer " + auth_.token);
-    }
+    if (auth.valid()) out.emplace_back("Authorization", "Bearer " + auth.token);
 
     if (includeByok) {
         // The server ignores keys it doesn't need, so sending every stored key
@@ -83,13 +129,26 @@ HttpHeaders Api::headers(bool includeByok) {
     return out;
 }
 
-bool Api::refresh() {
+bool Api::refresh(const RequestContext& context) {
     std::string refreshToken;
+    std::string apiUrl;
+    unsigned long long generation = 0;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (authGeneration_ != context.generation || apiUrl_ != context.apiUrl) return false;
+        if (auth_.token != context.auth.token) return auth_.valid();
+        if (refreshInProgress_) {
+            refreshCv_.wait(lock, [this] { return !refreshInProgress_; });
+            if (authGeneration_ != context.generation || apiUrl_ != context.apiUrl) return false;
+            if (auth_.token != context.auth.token) return auth_.valid();
+            return lastRefreshSucceeded_;
+        }
         refreshToken = auth_.refreshToken;
+        if (refreshToken.empty()) return false;
+        generation = authGeneration_;
+        apiUrl = apiUrl_;
+        refreshInProgress_ = true;
     }
-    if (refreshToken.empty()) return false;
 
     json body = json::object();
     body["refresh_token"] = refreshToken;
@@ -97,72 +156,165 @@ bool Api::refresh() {
     HttpHeaders plain;
     plain.emplace_back("Content-Type", "application/json");
 
-    const HttpResult result =
-        httpRequest("POST", joinUrl(settings_.apiUrl, "/auth/refresh"), plain, body.dump(), 30000);
-    if (!result.ok()) return false;
-
-    const json parsed = json::parse(result.body, nullptr, false);
-    if (parsed.is_discarded() || !parsed.is_object() || !parsed.contains("accessToken")) return false;
+    std::string originError;
+    HttpResult result;
+    if (!validateOrigin(apiUrl, originError)) {
+        result.error = originError;
+    } else {
+        result = httpRequest("POST", joinUrl(apiUrl, "/auth/refresh"), plain,
+                             body.dump(), 30000, false);
+    }
 
     AuthData updated;
-    updated.token = parsed.value("accessToken", std::string());
-    updated.refreshToken = parsed.value("refreshToken", refreshToken);
-    if (parsed.contains("expiresInSec") && parsed["expiresInSec"].is_number()) {
-        updated.expiresAtMs = nowMs() + parsed["expiresInSec"].get<long long>() * 1000;
+    bool succeeded = false;
+    if (result.ok()) {
+        const json parsed = json::parse(result.body, nullptr, false);
+        if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("accessToken")) {
+            updated.token = parsed.value("accessToken", std::string());
+            updated.refreshToken = parsed.value("refreshToken", refreshToken);
+            updated.apiUrl = apiUrl;
+            if (parsed.contains("expiresInSec") && parsed["expiresInSec"].is_number()) {
+                updated.expiresAtMs = nowMs() + parsed["expiresInSec"].get<long long>() * 1000;
+            }
+            succeeded = updated.valid();
+        }
     }
-    if (updated.token.empty()) return false;
 
-    saveAuth(updated);
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auth_ = updated;
+        if (generation != authGeneration_) {
+            succeeded = false; // sign-out or another credential replacement won the race
+        } else if (succeeded) {
+            saveAuth(updated);
+            auth_ = updated;
+        } else if (result.status == 401) {
+            clearAuth();
+            auth_ = AuthData{};
+            ++authGeneration_;
+        }
+        lastRefreshSucceeded_ = succeeded;
+        refreshInProgress_ = false;
     }
-    return true;
+    refreshCv_.notify_all();
+    return succeeded;
 }
 
-bool Api::ensureFreshToken() {
-    bool stale = false;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!auth_.valid()) return false;
-        stale = accessTokenExpired(auth_);
+bool Api::requestContext(RequestContext& context) {
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!auth_.valid()) return false;
+            context = RequestContext{auth_, apiUrl_, authGeneration_};
+            if (!accessTokenExpired(auth_)) return true;
+        }
+
+        if (context.auth.refreshToken.empty()) {
+            invalidateAuth(context.generation);
+            return false;
+        }
+        if (!refresh(context)) return false;
     }
-    if (!stale) return true;
-    return refresh();
+}
+
+bool Api::contextCurrent(const RequestContext& context) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return authGeneration_ == context.generation && apiUrl_ == context.apiUrl;
 }
 
 HttpResult Api::get(const std::string& path) {
-    ensureFreshToken();
-    HttpResult result = httpRequest("GET", joinUrl(settings_.apiUrl, path), headers(false), std::string());
-    if (result.status == 401 && refresh()) {
-        result = httpRequest("GET", joinUrl(settings_.apiUrl, path), headers(false), std::string());
+    RequestContext context;
+    if (!requestContext(context)) return {0, {}, "Your sign-in has expired. Sign in again to continue."};
+    std::string originError;
+    if (!validateOrigin(context.apiUrl, originError)) return {0, {}, originError};
+    HttpResult result = httpRequest("GET", joinUrl(context.apiUrl, path), headers(context.auth, false),
+                                    std::string(), 60000, false);
+    RequestContext retry;
+    if (result.status == 401 && refresh(context) && requestContext(retry) &&
+        retry.generation == context.generation && retry.apiUrl == context.apiUrl) {
+        result = httpRequest("GET", joinUrl(retry.apiUrl, path), headers(retry.auth, false),
+                             std::string(), 60000, false);
     }
-    if (result.status == 401) clearAuth();
+    if (result.status == 401) invalidateAuth(context.generation);
     return result;
 }
 
 HttpResult Api::post(const std::string& path, const json& body) {
-    ensureFreshToken();
-    const std::string payload = body.dump();
-    HttpResult result = httpRequest("POST", joinUrl(settings_.apiUrl, path), headers(false), payload);
-    if (result.status == 401 && refresh()) {
-        result = httpRequest("POST", joinUrl(settings_.apiUrl, path), headers(false), payload);
+    return postRequest(path, body, false);
+}
+
+bool Api::inferenceHeaders(const RequestContext& context, const json& body, HttpHeaders& out,
+                           std::string& error, const CancelCheck& cancelled) {
+    const std::string model = body.value("model", body.value("summarizerModel", std::string()));
+    out = headers(context.auth, model != kChatGptModel);
+    return chatGpt_.requestHeaders(model, context.apiUrl, out, error, cancelled);
+}
+
+bool Api::compactSession(const std::string& id, const std::string& model, std::string& error) {
+    const auto result = postRequest("/sessions/" + id + "/compact", json{{"summarizerModel", model}}, true);
+    if (!result.ok()) {
+        error = model == kChatGptModel && result.status != 0
+            ? "ChatGPT compaction failed (HTTP " + std::to_string(result.status) +
+              "). Check your connection or reconnect in Settings > Models. No fallback was used."
+            : describe(result);
+        return false;
     }
-    if (result.status == 401) clearAuth();
+    return true;
+}
+
+HttpResult Api::postRequest(const std::string& path, const json& body, bool inference) {
+    RequestContext context;
+    if (!requestContext(context)) return {0, {}, "Your sign-in has expired. Sign in again to continue."};
+    std::string originError;
+    if (!validateOrigin(context.apiUrl, originError)) return {0, {}, originError};
+    const std::string payload = body.dump();
+    HttpHeaders requestHeaders = headers(context.auth, false);
+    if (inference && !inferenceHeaders(context, body, requestHeaders, originError)) return {0, {}, originError};
+    if (!contextCurrent(context)) return {0, {}, {}, true};
+    HttpResult result = httpRequest("POST", joinUrl(context.apiUrl, path), requestHeaders,
+                                     payload, 60000, false);
+    RequestContext retry;
+    if (result.status == 401 && refresh(context) && requestContext(retry) &&
+        retry.generation == context.generation && retry.apiUrl == context.apiUrl) {
+        requestHeaders = headers(retry.auth, false);
+        if (inference && !inferenceHeaders(retry, body, requestHeaders, originError)) return {0, {}, originError};
+        if (!contextCurrent(retry)) return {0, {}, {}, true};
+        result = httpRequest("POST", joinUrl(retry.apiUrl, path), requestHeaders,
+                              payload, 60000, false);
+    }
+    if (result.status == 401) invalidateAuth(context.generation);
     return result;
 }
 
-HttpResult Api::streamChat(const json& body, const StreamSink& sink) {
-    ensureFreshToken();
+HttpResult Api::streamChat(const json& body,
+                           const StreamSink& sink,
+                           const CancelCheck& shouldCancel) {
+    RequestContext context;
+    if (!requestContext(context)) return {0, {}, "Your sign-in has expired. Sign in again to continue."};
+    std::string originError;
+    if (!validateOrigin(context.apiUrl, originError)) return {0, {}, originError};
     const std::string payload = body.dump();
-    const std::string url = joinUrl(settings_.apiUrl, "/chat");
+    const std::string url = joinUrl(context.apiUrl, "/chat");
 
-    HttpResult result = httpStream("POST", url, headers(true), payload, sink);
+    HttpHeaders requestHeaders;
+    if (!inferenceHeaders(context, body, requestHeaders, originError, shouldCancel)) return {0, {}, originError};
+    if (!contextCurrent(context)) return {0, {}, {}, true};
+    HttpResult result = httpStream("POST", url, requestHeaders, payload, sink, shouldCancel);
     // A 401 is returned before any body is streamed, so replaying is safe.
-    if (result.status == 401 && refresh()) {
-        result = httpStream("POST", url, headers(true), payload, sink);
+    RequestContext retry;
+    if (result.status == 401 && refresh(context) && requestContext(retry) &&
+        retry.generation == context.generation && retry.apiUrl == context.apiUrl) {
+        HttpHeaders retryHeaders;
+        if (!inferenceHeaders(retry, body, retryHeaders, originError, shouldCancel)) return {0, {}, originError};
+        if (!contextCurrent(retry)) return {0, {}, {}, true};
+        result = httpStream("POST", joinUrl(retry.apiUrl, "/chat"), retryHeaders, payload,
+                            sink, shouldCancel);
     }
-    if (result.status == 401) clearAuth();
+    if (result.status == 401) invalidateAuth(context.generation);
+    if (!result.ok() && !result.aborted && body.value("model", std::string()) == kChatGptModel) {
+        result.body.clear();
+        result.error = "ChatGPT request failed (HTTP " + std::to_string(result.status) +
+            "). Check your connection or reconnect in Settings > Models. No fallback was used.";
+    }
     return result;
 }
 

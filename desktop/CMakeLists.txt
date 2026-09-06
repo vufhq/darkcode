@@ -29,6 +29,8 @@ add_executable(darkcode-desktop WIN32
   src/theme.cpp
   src/util.cpp
   src/config.cpp
+  src/oauth.cpp
+  src/chatgpt_auth.cpp
   src/http.cpp
   src/api.cpp
   src/chat.cpp
@@ -36,6 +38,7 @@ add_executable(darkcode-desktop WIN32
   src/permissions.cpp
   src/html.cpp
   src/web.cpp
+  src/window.cpp
   ${IMGUI_DIR}/imgui.cpp
   ${IMGUI_DIR}/imgui_draw.cpp
   ${IMGUI_DIR}/imgui_tables.cpp
@@ -62,6 +65,7 @@ target_link_libraries(darkcode-desktop PRIVATE
   d3d11 dxgi d3dcompiler
   winhttp
   shell32 shlwapi ole32 advapi32 user32 gdi32 dwmapi
+  bcrypt ws2_32 crypt32
 )
 
 if(MSVC)
@@ -84,13 +88,18 @@ add_executable(darkcode-desktop-tests
   src/html.cpp
   src/web.cpp
   src/http.cpp
+  src/oauth.cpp
+  src/chatgpt_auth.cpp
+  src/config.cpp
 )
 target_include_directories(darkcode-desktop-tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
   "${CMAKE_CURRENT_SOURCE_DIR}/vendor"
 )
 target_compile_definitions(darkcode-desktop-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(darkcode-desktop-tests PRIVATE winhttp)
+target_link_libraries(darkcode-desktop-tests PRIVATE
+  winhttp shell32 ole32 advapi32 bcrypt ws2_32 crypt32
+)
 if(MSVC)
   target_compile_options(darkcode-desktop-tests PRIVATE /utf-8 /W4 /permissive- /EHsc /MP)
   set_property(TARGET darkcode-desktop-tests PROPERTY MSVC_RUNTIME_LIBRARY
@@ -99,6 +108,15 @@ endif()
 
 enable_testing()
 add_test(NAME logic COMMAND darkcode-desktop-tests)
+
+# The bundled fonts are optional at runtime — the app falls back to system
+# faces — but copying them beside the executable is what makes it look the same
+# on every machine.
+add_custom_command(TARGET darkcode-desktop POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+          "$<TARGET_FILE_DIR:darkcode-desktop>/assets"
+  COMMENT "Copying assets beside the executable")
 
 set_target_properties(darkcode-desktop PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"

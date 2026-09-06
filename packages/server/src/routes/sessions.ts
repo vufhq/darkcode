@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { OpenAIOAuthRequiredError, readOpenAIOAuthHeaders } from "../lib/openai-codex";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { db } from "@darkcode/database/client";
@@ -6,6 +7,7 @@ import type { Prisma } from "@darkcode/database";
 import type { UIMessage } from "ai";
 import {
   BYOK_PROVIDERS,
+  CHATGPT_MODEL_ID,
   BYOK_PROVIDER_HEADER,
   DEFAULT_CHAT_MODEL_ID,
 } from "@darkcode/shared";
@@ -136,10 +138,17 @@ const app = new Hono<AuthenticatedEnv>()
         return c.json({ error: "Nothing to compact" }, 400);
       }
 
+      if (body.summarizerModel && !isSupportedChatModel(body.summarizerModel)) {
+        return c.json({ error: "Unsupported summarizer model" }, 400);
+      }
+      const lastModel = rawWorking.findLast((message) => {
+        const metadata = message.metadata as { model?: string } | undefined;
+        return metadata?.model != null;
+      })?.metadata as { model?: string } | undefined;
       const summarizerId =
         body.summarizerModel && isSupportedChatModel(body.summarizerModel)
           ? body.summarizerModel
-          : DEFAULT_CHAT_MODEL_ID;
+          : lastModel?.model === CHATGPT_MODEL_ID ? CHATGPT_MODEL_ID : DEFAULT_CHAT_MODEL_ID;
 
       const apiKeys: ProviderApiKeys = {};
       for (const provider of BYOK_PROVIDERS) {
@@ -149,8 +158,10 @@ const app = new Hono<AuthenticatedEnv>()
 
       let resolvedSummarizer;
       try {
-        resolvedSummarizer = resolveChatModel(summarizerId, apiKeys);
+        resolvedSummarizer = resolveChatModel(summarizerId, apiKeys,
+          summarizerId === CHATGPT_MODEL_ID ? readOpenAIOAuthHeaders(c.req.raw.headers) : undefined);
       } catch (error) {
+        if (error instanceof OpenAIOAuthRequiredError) return c.json({ error: error.message, provider: "openai-codex" }, 400);
         if (error instanceof ApiKeyRequiredError) {
           return c.json(
             {

@@ -17,6 +17,14 @@ export function initSentry() {
     release: env.SENTRY_RELEASE,
     tracesSampleRate: env.SENTRY_TRACES_SAMPLE_RATE,
     sendDefaultPii: false,
+    beforeSend(event) {
+      if (event.request?.headers) {
+        for (const key of Object.keys(event.request.headers)) {
+          if (["x-darkcode-openai-oauth-token", "x-darkcode-openai-account-id"].includes(key.toLowerCase())) delete event.request.headers[key];
+        }
+      }
+      return event;
+    },
   });
 
   initialized = true;

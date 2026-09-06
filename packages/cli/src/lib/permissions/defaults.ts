@@ -135,6 +135,9 @@ export const DEFAULT_POLICY: Policy = {
       "**/.ssh/**",
       "**/.aws/**",
       "**/.gnupg/**",
+      // Include atomic-save staging files and projects rooted in ~/.darkcode.
+      "**/openai-oauth.json",
+      "**/openai-oauth.json.*.tmp",
     ],
     // Files whose contents must never be sent to the model. Reads are
     // otherwise unrestricted. Seeded from `denyWrite` — a file worth
@@ -163,6 +166,8 @@ export const DEFAULT_POLICY: Policy = {
       // DarkCode's own credential files, if the project happens to sit at $HOME.
       "**/.darkcode/auth.json",
       "**/.darkcode/api-keys.json",
+      "**/openai-oauth.json",
+      "**/openai-oauth.json.*.tmp",
     ],
   },
 };

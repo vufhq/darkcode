@@ -1,4 +1,6 @@
 import { useCallback, useState } from "react";
+import { ChatGPTAuthDialogContent } from "./chatgpt-auth-dialog";
+import { openAIOAuth } from "../../lib/openai-oauth";
 import { TextAttributes } from "@opentui/core";
 import { useDialog } from "../../providers/dialog";
 import { useToast } from "../../providers/toast";
@@ -16,14 +18,14 @@ import {
 const KEYLESS_PROVIDERS = new Set<ByokProvider>(["ollama"]);
 
 type ProviderRow = {
-  provider: ByokProvider;
+   provider: ByokProvider | "openai-codex";
   label: string;
 };
 
-const PROVIDERS: ProviderRow[] = BYOK_PROVIDERS.map((provider) => ({
+const PROVIDERS: ProviderRow[] = [{ provider: "openai-codex", label: "ChatGPT (OAuth)" }, ...BYOK_PROVIDERS.map((provider) => ({
   provider,
   label: BYOK_PROVIDER_LABELS[provider],
-}));
+}))];
 
 export function KeysDialogContent() {
   const dialog = useDialog();
@@ -33,6 +35,10 @@ export function KeysDialogContent() {
 
   const handleSelect = useCallback(
     (row: ProviderRow) => {
+      if (row.provider === "openai-codex") {
+        dialog.open({ title: "ChatGPT authentication", children: <ChatGPTAuthDialogContent /> });
+        return;
+      }
       // Keyless providers (e.g. Ollama) don't need a stored key — just inform
       // the user that the provider is available without authentication.
       if (KEYLESS_PROVIDERS.has(row.provider)) {
@@ -75,9 +81,10 @@ export function KeysDialogContent() {
       onSelect={handleSelect}
       filterFn={(row, query) => row.label.toLowerCase().includes(query.toLowerCase())}
       renderItem={(row, isSelected) => {
-        const isKeyless = KEYLESS_PROVIDERS.has(row.provider);
-        const hasKey = !isKeyless && getApiKey(row.provider) != null;
-        const hint = isKeyless
+        const isOAuth = row.provider === "openai-codex";
+        const isKeyless = !isOAuth && KEYLESS_PROVIDERS.has(row.provider as ByokProvider);
+        const hasKey = !isOAuth && !isKeyless && getApiKey(row.provider as ByokProvider) != null;
+        const hint = isOAuth ? (openAIOAuth.connected() ? "connected - manage" : "not connected - connect") : isKeyless
           ? "no key required · local"
           : hasKey
             ? "set · enter to clear"

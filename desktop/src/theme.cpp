@@ -4,8 +4,26 @@
 
 #include <string>
 
+#include "util.h"
+
 namespace dc::theme {
 namespace {
+
+/// Fonts shipped with the app, in `assets/fonts` beside the executable. Tried
+/// before the system copies so the app looks the same on every machine, and
+/// optional so a bare .exe still runs.
+std::string bundledFontPath(const char* fileName) {
+    wchar_t exePath[MAX_PATH]{};
+    if (::GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0) return {};
+
+    std::wstring path(exePath);
+    const size_t slash = path.find_last_of(L'\\');
+    if (slash == std::wstring::npos) return {};
+    path.resize(slash + 1);
+    path += L"assets\\fonts\\";
+
+    return toUtf8(path) + fileName;
+}
 
 std::string systemFontPath(const char* fileName) {
     char directory[MAX_PATH]{};
@@ -14,11 +32,24 @@ std::string systemFontPath(const char* fileName) {
     return std::string(directory, length) + "\\Fonts\\" + fileName;
 }
 
+/// Fonts installed for the current user only live outside %WINDIR%\Fonts, which
+/// is where Inter and JetBrains Mono land if someone installs them without
+/// admin rights.
+std::string userFontPath(const char* fileName) {
+    char localAppData[MAX_PATH]{};
+    const DWORD length = ::GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return {};
+    return std::string(localAppData, length) + "\\Microsoft\\Windows\\Fonts\\" + fileName;
+}
+
 ImFont* tryLoad(ImGuiIO& io, const char* fileName, float sizePixels, const ImFontConfig* config) {
-    const std::string path = systemFontPath(fileName);
-    if (path.empty()) return nullptr;
-    if (::GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) return nullptr;
-    return io.Fonts->AddFontFromFileTTF(path.c_str(), sizePixels, config);
+    for (const std::string& path : {bundledFontPath(fileName), systemFontPath(fileName),
+                                    userFontPath(fileName)}) {
+        if (path.empty()) continue;
+        if (::GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        return io.Fonts->AddFontFromFileTTF(path.c_str(), sizePixels, config);
+    }
+    return nullptr;
 }
 
 /// First font in the list that exists. Keeps the fallback chains readable.
@@ -31,6 +62,22 @@ ImFont* loadFirst(ImGuiIO& io, std::initializer_list<const char*> fileNames, flo
 }
 
 } // namespace
+
+void drawSpectrum(ImDrawList* draw, const ImVec2& min, const ImVec2& max, float alpha) {
+    const float width = max.x - min.x;
+    if (width <= 0.0f) return;
+
+    for (int i = 0; i < kSpectrumCount - 1; ++i) {
+        const float x0 = min.x + width * kSpectrumStops[i];
+        const float x1 = min.x + width * kSpectrumStops[i + 1];
+        if (x1 <= x0) continue;
+
+        const ImU32 left = ImGui::GetColorU32(withAlpha(kSpectrum[i], alpha));
+        const ImU32 right = ImGui::GetColorU32(withAlpha(kSpectrum[i + 1], alpha));
+        // Vertical edges share a colour, so the bands meet without a seam.
+        draw->AddRectFilledMultiColor(ImVec2(x0, min.y), ImVec2(x1, max.y), left, right, right, left);
+    }
+}
 
 Fonts loadFonts(float scale) {
     ImGuiIO& io = ImGui::GetIO();
@@ -54,28 +101,33 @@ Fonts loadFonts(float scale) {
     config.OversampleH = 3; // small text needs the horizontal samples
     config.OversampleV = 1;
     config.PixelSnapH = true;
-    config.RasterizerMultiply = 1.05f; // Segoe UI renders thin on a dark ground
+    config.RasterizerMultiply = 1.05f; // these faces render thin on a black ground
     config.GlyphRanges = kRanges;
 
-    // Deliberately smaller than the usual ImGui defaults. Dense, quiet text is
+    // 15px body with a 1.55 line height, as the site sets. Dense, quiet text is
     // most of what separates an application from a debug overlay.
-    fonts.body = loadFirst(io, {"segoeui.ttf"}, 15.0f * scale, &config);
+    fonts.body = loadFirst(io, {"Inter-Regular.ttf", "Inter.ttc", "segoeui.ttf"}, 15.0f * scale, &config);
     if (!fonts.body) fonts.body = io.Fonts->AddFontDefault();
 
-    fonts.caption = loadFirst(io, {"segoeui.ttf"}, 12.5f * scale, &config);
+    fonts.caption = loadFirst(io, {"Inter-Regular.ttf", "Inter.ttc", "segoeui.ttf"}, 12.5f * scale, &config);
     if (!fonts.caption) fonts.caption = fonts.body;
 
+    // Weight 300 for anything set large: the site never shouts at size.
+    fonts.light = loadFirst(io, {"Inter-Light.ttf", "segoeuil.ttf", "segoeui.ttf"}, 19.0f * scale, &config);
+    if (!fonts.light) fonts.light = fonts.body;
+
     // Semibold, not bold: bold at these sizes reads as shouting.
-    fonts.medium = loadFirst(io, {"seguisb.ttf", "segoeuib.ttf"}, 13.5f * scale, &config);
+    fonts.medium = loadFirst(io, {"Inter-SemiBold.ttf", "seguisb.ttf", "segoeuib.ttf"}, 13.0f * scale, &config);
     if (!fonts.medium) fonts.medium = fonts.body;
 
-    fonts.heading = loadFirst(io, {"seguisb.ttf", "segoeuib.ttf"}, 15.5f * scale, &config);
+    fonts.heading = loadFirst(io, {"Inter-SemiBold.ttf", "seguisb.ttf", "segoeuib.ttf"}, 15.0f * scale, &config);
     if (!fonts.heading) fonts.heading = fonts.body;
 
-    fonts.display = loadFirst(io, {"seguisb.ttf", "segoeuib.ttf"}, 17.0f * scale, &config);
+    fonts.display = loadFirst(io, {"Inter-SemiBold.ttf", "seguisb.ttf", "segoeuib.ttf"}, 16.5f * scale, &config);
     if (!fonts.display) fonts.display = fonts.heading;
 
-    fonts.mono = loadFirst(io, {"CascadiaMono.ttf", "consola.ttf"}, 12.5f * scale, &config);
+    fonts.mono = loadFirst(io, {"JetBrainsMono-Regular.ttf", "CascadiaMono.ttf", "consola.ttf"},
+                           12.0f * scale, &config);
     if (!fonts.mono) fonts.mono = fonts.body;
 
     io.FontDefault = fonts.body;
@@ -100,11 +152,11 @@ void applyStyle(float scale) {
     style.FrameBorderSize = 1.0f;
 
     style.WindowRounding = 0.0f;
-    style.ChildRounding = kRadiusLg;
+    style.ChildRounding = kRadiusMd;
     style.FrameRounding = kRadiusMd;
     style.PopupRounding = kRadiusLg;
-    style.ScrollbarRounding = 8.0f;
-    style.GrabRounding = 8.0f;
+    style.ScrollbarRounding = kRadiusFull;
+    style.GrabRounding = kRadiusFull;
     style.TabRounding = kRadiusMd;
 
     style.WindowTitleAlign = ImVec2(0.0f, 0.5f);
@@ -115,51 +167,51 @@ void applyStyle(float scale) {
     ImVec4* colors = style.Colors;
     colors[ImGuiCol_WindowBg] = kCanvas;
     colors[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
-    colors[ImGuiCol_PopupBg] = kSurface;
+    colors[ImGuiCol_PopupBg] = ImVec4(0.043f, 0.043f, 0.043f, 1.0f); // opaque, or the page shows through
     colors[ImGuiCol_Border] = kBorder;
     colors[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
 
     colors[ImGuiCol_Text] = kText;
     colors[ImGuiCol_TextDisabled] = kTextFaint;
-    colors[ImGuiCol_TextSelectedBg] = withAlpha(kAccent, 0.30f);
+    colors[ImGuiCol_TextSelectedBg] = ImVec4(1.0f, 1.0f, 1.0f, 0.16f);
 
     colors[ImGuiCol_FrameBg] = kSurface;
     colors[ImGuiCol_FrameBgHovered] = kSurfaceHover;
     colors[ImGuiCol_FrameBgActive] = kSurfaceActive;
 
-    colors[ImGuiCol_TitleBg] = kSidebar;
-    colors[ImGuiCol_TitleBgActive] = kSidebar;
-    colors[ImGuiCol_TitleBgCollapsed] = kSidebar;
+    colors[ImGuiCol_TitleBg] = kCanvas;
+    colors[ImGuiCol_TitleBgActive] = kCanvas;
+    colors[ImGuiCol_TitleBgCollapsed] = kCanvas;
 
-    // Secondary buttons are surfaces, not coloured slabs. The one primary
-    // action per screen gets the accent, applied at the call site.
+    // Every secondary control is the ground plus a little white. The one
+    // primary action per screen inverts to white-on-black at the call site.
     colors[ImGuiCol_Button] = kSurface;
     colors[ImGuiCol_ButtonHovered] = kSurfaceHover;
     colors[ImGuiCol_ButtonActive] = kSurfaceActive;
 
-    colors[ImGuiCol_Header] = withAlpha(kAccent, 0.16f);
+    colors[ImGuiCol_Header] = kSurfaceHover;
     colors[ImGuiCol_HeaderHovered] = kSurfaceHover;
-    colors[ImGuiCol_HeaderActive] = withAlpha(kAccent, 0.24f);
+    colors[ImGuiCol_HeaderActive] = kSurfaceActive;
 
     colors[ImGuiCol_Separator] = kBorder;
     colors[ImGuiCol_SeparatorHovered] = kBorderStrong;
-    colors[ImGuiCol_SeparatorActive] = kAccent;
+    colors[ImGuiCol_SeparatorActive] = kBorderStrong;
 
     colors[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
-    colors[ImGuiCol_ScrollbarGrab] = withAlpha(kTextFaint, 0.30f);
-    colors[ImGuiCol_ScrollbarGrabHovered] = withAlpha(kTextFaint, 0.50f);
-    colors[ImGuiCol_ScrollbarGrabActive] = withAlpha(kTextMuted, 0.70f);
+    colors[ImGuiCol_ScrollbarGrab] = ImVec4(1.0f, 1.0f, 1.0f, 0.12f);
+    colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(1.0f, 1.0f, 1.0f, 0.20f);
+    colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(1.0f, 1.0f, 1.0f, 0.28f);
 
-    colors[ImGuiCol_CheckMark] = kAccent;
-    colors[ImGuiCol_SliderGrab] = kAccent;
+    colors[ImGuiCol_CheckMark] = kText;
+    colors[ImGuiCol_SliderGrab] = kText;
     colors[ImGuiCol_SliderGrabActive] = kAccentHover;
 
     colors[ImGuiCol_Tab] = kSurface;
     colors[ImGuiCol_TabHovered] = kSurfaceHover;
     colors[ImGuiCol_TabSelected] = kSurfaceActive;
 
-    colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.02f, 0.02f, 0.03f, 0.72f);
-    colors[ImGuiCol_NavCursor] = withAlpha(kAccent, 0.70f);
+    colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.72f);
+    colors[ImGuiCol_NavCursor] = kFocusRing;
 
     style.ScaleAllSizes(scale);
 }

@@ -530,7 +530,8 @@ export async function executeLocalTool(
     }
     case "lspDefinition": {
       const { path, line, character } = toolInputSchemas.lspDefinition.parse(input);
-      const { resolved } = await resolveInsideCwd(path);
+      const { cwd, resolved } = await resolveInsideCwd(path);
+      await guardRead(cwd, resolved);
       const pool = getLspPool();
       const result = await pool.definition(resolved, { line, character });
       if (!result) return { locations: [], message: "No definition found or language server unavailable" };
@@ -545,7 +546,8 @@ export async function executeLocalTool(
     case "lspReferences": {
       const { path, line, character, includeDeclaration } =
         toolInputSchemas.lspReferences.parse(input);
-      const { resolved } = await resolveInsideCwd(path);
+      const { cwd, resolved } = await resolveInsideCwd(path);
+      await guardRead(cwd, resolved);
       const pool = getLspPool();
       const result = await pool.references(resolved, { line, character }, includeDeclaration);
       if (!result) return { locations: [], message: "No references found or language server unavailable" };
@@ -560,7 +562,8 @@ export async function executeLocalTool(
     }
     case "lspHover": {
       const { path, line, character } = toolInputSchemas.lspHover.parse(input);
-      const { resolved } = await resolveInsideCwd(path);
+      const { cwd, resolved } = await resolveInsideCwd(path);
+      await guardRead(cwd, resolved);
       const pool = getLspPool();
       const result = await pool.hover(resolved, { line, character });
       if (!result) return { content: null, message: "No hover information or language server unavailable" };
@@ -576,7 +579,8 @@ export async function executeLocalTool(
     }
     case "lspDiagnostics": {
       const { path } = toolInputSchemas.lspDiagnostics.parse(input);
-      const { resolved } = await resolveInsideCwd(path);
+      const { cwd, resolved } = await resolveInsideCwd(path);
+      await guardRead(cwd, resolved);
       const pool = getLspPool();
       const diags = await pool.getDiagnostics(resolved);
       return formatDiagnostics(diags);

@@ -12,6 +12,7 @@
 #include "app.h"
 #include "theme.h"
 #include "util.h"
+#include "window.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -92,6 +93,13 @@ void cleanupDevice() {
 }
 
 LRESULT WINAPI windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    // The chrome layer answers the frame messages first: ImGui has no opinion
+    // on WM_NCCALCSIZE or WM_NCHITTEST, and DefWindowProc would put the caption
+    // straight back.
+    LRESULT chromeResult = 0;
+    if (dc::window::handleMessage(hwnd, message, wParam, lParam, &chromeResult)) {
+        return chromeResult;
+    }
     if (ImGui_ImplWin32_WndProcHandler(hwnd, message, wParam, lParam)) return true;
 
     switch (message) {
@@ -136,6 +144,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     windowClass.lpszClassName = L"DarkCodeDesktop";
     ::RegisterClassExW(&windowClass);
 
+    // WS_OVERLAPPEDWINDOW is kept even though the caption is removed in
+    // WM_NCCALCSIZE: the style is what earns snap layouts, Win+Arrow, the
+    // minimise animation and the taskbar thumbnail.
     HWND hwnd = ::CreateWindowW(windowClass.lpszClassName, L"DarkCode", WS_OVERLAPPEDWINDOW, 100, 100,
                                 1360, 900, nullptr, nullptr, instance, nullptr);
     if (!hwnd) {
@@ -143,6 +154,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         return 1;
     }
     useDarkTitleBar(hwnd);
+    dc::window::makeFrameless(hwnd);
 
     if (!createDevice(hwnd)) {
         cleanupDevice();

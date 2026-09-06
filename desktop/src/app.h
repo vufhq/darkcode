@@ -16,14 +16,17 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "api.h"
 #include "chat.h"
 #include "config.h"
 #include "permissions.h"
+#include "oauth.h"
 #include "theme.h"
 #include "tools.h"
+#include "window.h"
 
 namespace dc {
 
@@ -49,19 +52,29 @@ private:
     void loadSessionMessages(const std::string& id);
     void startNewSession();
     void refreshCredits();
-    void submit(const std::string& text);
+    bool submit(const std::string& text);
     void stopTurn();
-    void runTurn();
+    void compactSession();
+    void runTurn(unsigned long long generation);
     void joinTurnThread();
+    void joinBackgroundThreads();
+    void joinAccountThreads();
+    void startSignIn();
+    void cancelSignIn();
+    void startSignOut();
+    void clearAccountState();
 
     /// Runs each pending tool in order, publishing every result into
     /// `messages_[assistantIndex]` as it lands so the UI shows progress.
-    void resolvePendingToolCalls(Message& message, size_t assistantIndex);
+    void resolvePendingToolCalls(Message& message,
+                                 size_t assistantIndex,
+                                 unsigned long long generation);
     json buildRequestBody(const Message& userMessage, const Message* assistantMessage) const;
 
     void toast(const std::string& text, bool isError = false);
 
     // ---- drawing ---------------------------------------------------------
+    void drawTitleBar();
     void drawSidebar(float width);
     void drawMainColumn();
     void drawTopBar();
@@ -99,6 +112,11 @@ private:
     std::string pendingSubmit_;
     std::string pendingToast_;
     bool pendingToastIsError_ = false;
+    bool pendingSignInComplete_ = false;
+    std::string pendingSignInError_;
+    std::optional<AuthData> pendingSignInAuth_;
+    unsigned long long pendingSignInGeneration_ = 0;
+    std::string pendingSignInOrigin_;
 
     // ---- UI-thread-owned -------------------------------------------------
     std::string activeSessionId_;
@@ -112,19 +130,42 @@ private:
     bool turnSendProjectContext_ = true;
 
     std::atomic<bool> sessionLoading_{false};
+    std::atomic<bool> sessionCreating_{false};
+    std::atomic<bool> creditsLoading_{false};
+    std::atomic<bool> signOutLoading_{false};
+    std::atomic<unsigned long long> accountGeneration_{0};
     std::atomic<bool> cancelTurn_{false};
+    std::atomic<bool> turnFinished_{true};
     std::atomic<bool> scrollToBottom_{false};
     std::atomic<double> credits_{-1.0};
     std::atomic<bool> signedIn_{false};
+    std::atomic<bool> signingIn_{false};
+    std::atomic<bool> cancelSignIn_{false};
     std::thread turnThread_;
+    std::thread sessionsThread_;
+    std::thread creditsThread_;
+    std::thread sessionLoadThread_;
+    std::thread sessionCreateThread_;
+    std::thread authThread_;
+    std::thread signOutThread_;
+    std::thread compactThread_;
+    std::atomic<bool> compacting_{false};
+
+    std::mutex authStateMutex_;
+    std::string signInStatus_;
+    std::string signInError_;
+    bool refreshSessionsWhenIdle_ = false;
+    bool refreshCreditsWhenIdle_ = false;
 
     std::vector<char> composerBuffer_;
     bool focusComposer_ = true;
     bool showSettings_ = false;
+    int settingsTab_ = 0;
     std::vector<char> apiUrlBuffer_;
     std::vector<char> projectDirBuffer_;
     std::vector<std::vector<char>> apiKeyBuffers_;
     std::set<std::string> expandedTools_; // keyed by toolCallId
+    std::unordered_map<ImGuiID, float> toolDetailHeights_;
 
     std::string toastText_;
     bool toastIsError_ = false;

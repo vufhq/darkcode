@@ -17,14 +17,16 @@ struct ModelInfo {
     bool requiresApiKey;
     int contextWindow;
     std::string_view note;
+    std::string_view oauthProvider = {}; // independent of API-key providers
 };
 
-inline constexpr std::array<ModelInfo, 13> kModels{{
+inline constexpr std::array<ModelInfo, 14> kModels{{
     {"darkcode-ai", "Kimi K2.6", "", false, 128000, "Hosted default, billed as credits"},
     {"claude-sonnet-4-6", "Claude Sonnet 4.6", "anthropic", true, 200000, "Hosted on credits or BYOK"},
     {"claude-haiku-4-5", "Claude Haiku 4.5", "anthropic", true, 200000, "Hosted on credits or BYOK"},
     {"claude-opus-4-6", "Claude Opus 4.6", "anthropic", true, 200000, "Pro tier"},
     {"gpt-5.4", "GPT-5.4", "openai", true, 400000, "Hosted on credits or BYOK"},
+    {"chatgpt-gpt-5.4", "GPT-5.4 (ChatGPT)", "", false, 400000, "ChatGPT OAuth. Connect in Settings > Models. No hosted or API-key fallback.", "openai-codex"},
     {"gpt-5.4-mini", "GPT-5.4 mini", "openai", true, 400000, "Hosted on credits or BYOK"},
     {"gpt-5.4-nano", "GPT-5.4 nano", "openai", true, 400000, "Hosted on credits or BYOK"},
     {"deepseek-chat", "DeepSeek V3", "deepseek", true, 65536, "Hosted on credits or BYOK"},

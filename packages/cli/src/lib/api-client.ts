@@ -1,4 +1,5 @@
 import { hc } from "hono/client";
+import { oauthSafeFetch } from "./openai-oauth";
 import type { AppType } from "@darkcode/server";
 import { API_URL } from "./config";
 import { clearAuth, getAuth, isAccessTokenExpired } from "./auth";
@@ -31,7 +32,7 @@ export const apiClient = hc<AppType>(
 
       applyAuthHeader(headers, auth?.token ?? null);
 
-      let response = await fetch(input, { ...init, headers });
+      let response = await oauthSafeFetch(input, { ...init, headers });
 
       // Reactive refresh: if the server rejected with 401, try a single
       // refresh and replay the request once. Clearing local auth on a final
@@ -40,7 +41,7 @@ export const apiClient = hc<AppType>(
         const refreshed = await refreshAccessToken();
         if (refreshed) {
           applyAuthHeader(headers, refreshed.token);
-          response = await fetch(input, { ...init, headers });
+          response = await oauthSafeFetch(input, { ...init, headers });
         }
       }
 

@@ -1,4 +1,6 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { createCodexModel } from "./openai-codex";
+import type { OpenAIOAuthCredentials } from "@darkcode/shared";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import {
@@ -281,10 +283,13 @@ export type ProviderApiKeys = Partial<Record<ByokProvider, string>>;
 function resolveSupportedChatModel(
   model: SupportedChatModel,
   apiKeys: ProviderApiKeys,
+  oauth?: OpenAIOAuthCredentials,
 ): ResolvedModel {
   const provider = model.provider;
 
   switch (provider) {
+    case "openai-codex":
+      return { model: createCodexModel(oauth), provider, modelId: model.id, isMetered: false };
     case "darkcode":
       return resolveDarkcodeModel(model.id);
 
@@ -364,11 +369,11 @@ export function isSupportedChatModel(modelId: string): modelId is SupportedChatM
   return findSupportedChatModel(modelId) != null;
 }
 
-export function resolveChatModel(modelId: string, apiKeys: ProviderApiKeys = {}): ResolvedModel {
+export function resolveChatModel(modelId: string, apiKeys: ProviderApiKeys = {}, oauth?: OpenAIOAuthCredentials): ResolvedModel {
   const model = findSupportedChatModel(modelId);
   if (!model) {
     throw new Error(`Unsupported model: ${modelId}`);
   }
 
-  return resolveSupportedChatModel(model, apiKeys);
+  return resolveSupportedChatModel(model, apiKeys, oauth);
 }

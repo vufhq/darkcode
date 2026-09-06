@@ -58,6 +58,59 @@ Switch between models at any time with `/models`. If a model needs a key the CLI
 
 ## Getting Started
 
+### ChatGPT OAuth
+
+Use `/keys` > **ChatGPT (OAuth)** > **Connect in browser**, then select
+**GPT-5.4 (ChatGPT)** in `/models`. The same menu offers reconnect, cancellation,
+connected status, and disconnect. DarkCode `/login` is still required and is
+unrelated to your ChatGPT connection. Existing OpenAI API-key models are unchanged.
+
+**Trust boundary:** your ChatGPT **access token and account ID are forwarded to
+the configured DarkCode API server** for chat, tool continuations, and manual or
+automatic context compaction. That server can use the access token while it is
+valid. Connect only to a server you trust. The CLI requires HTTPS, except for
+literal loopback hosts, and refuses redirects on requests carrying these headers.
+Operators must also exclude these headers from reverse-proxy logs and telemetry.
+Conversation persistence on DarkCode remains unchanged; Codex `store: false`
+does not disable DarkCode session history.
+
+Browser login uses OpenAI PKCE S256 with a one-shot, state-validated callback at
+`http://localhost:1455/auth/callback`, bound only to `127.0.0.1`. Login times out
+after five minutes; Escape/Cancel closes the listener. Port 1455 must be free.
+DarkCode never imports `~/.codex` credentials or connects automatically.
+
+CLI credentials live separately at `~/.darkcode/openai-oauth.json`, using atomic
+replacement and owner-only file permissions on POSIX. This file is **not
+encrypted**; Windows protection depends on your user-profile ACLs. Keep it out of
+backups/shared folders accessible to others. Refresh tokens remain local and are
+refreshed under a cross-process SQLite mutation lock, rereading credentials after
+acquiring it. The lock waits up to 45 seconds and is released automatically if its
+owner exits. `openai-oauth-lock.sqlite` contains only a revision, never credentials;
+do not delete it while CLI processes are running. A refresh failure blocks inference
+and removes local credentials; reconnect explicitly. Disconnect waits for any
+in-progress credential mutation before removing local
+credentials, not OpenAI's authorization grant or an already forwarded access token;
+revoke access through your OpenAI account when necessary.
+
+The wire model is `chatgpt-gpt-5.4`, provider `openai-codex`, upstream model
+`gpt-5.4` at `https://chatgpt.com/backend-api/codex/responses`. Only this model uses
+`x-darkcode-openai-oauth-token` and `x-darkcode-openai-account-id`; these constants
+are exported by `@darkcode/shared`. Manual compaction sends
+`{ "summarizerModel": "chatgpt-gpt-5.4" }`. No refresh token goes to DarkCode.
+This model never falls back to hosted credits or OpenAI API keys. Model tokens
+and its compaction are unmetered by DarkCode; the separate server web-search tool
+still uses DarkCode credits. ChatGPT/Codex entitlement and usage limits apply.
+
+This integration follows public source, not a guaranteed third-party API contract;
+OpenAI may change availability or require a different client registration:
+[Codex browser login](https://github.com/openai/codex/blob/main/codex-rs/login/src/server.rs),
+[client ID and refresh](https://github.com/openai/codex/blob/main/codex-rs/login/src/auth/manager.rs),
+[Codex provider endpoint](https://github.com/openai/codex/blob/main/codex-rs/model-provider-info/src/lib.rs),
+[Responses wire request](https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/common.rs),
+[OpenCode Codex integration](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/plugin/openai/codex.ts).
+The AI SDK Responses adapter is used with `store: false`, instructions, unsupported
+parameters stripped, and `stream: true` even for `generateText` summarization.
+
 ### Prerequisites
 
 - [Bun](https://bun.sh) installed
